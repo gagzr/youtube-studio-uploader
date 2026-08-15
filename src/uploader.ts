@@ -100,6 +100,21 @@ export class YouTubeUploader {
         console.log(`📸 Diagnostic snapshot saved to: ${stateScreenshot}`);
       } catch {}
 
+      // Click "SKIP TO YOUTUBE STUDIO" interstitial if unsupported browser page is shown
+      const skipBtn = await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+        const skip = els.find(el => el.textContent?.trim().toUpperCase().includes('SKIP TO YOUTUBE STUDIO')) as HTMLElement;
+        if (skip) { skip.click(); return true; }
+        return false;
+      });
+      if (skipBtn) {
+        console.log('[+] Dismissed "Unsupported Browser" interstitial via Skip link.');
+        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await page.waitForTimeout(3000);
+        currentUrl = page.url();
+        console.log(`[+] Now at: ${currentUrl}`);
+      }
+
       if (
         currentUrl.includes('signin/v2/challenge') ||
         currentUrl.includes('challenge') ||
