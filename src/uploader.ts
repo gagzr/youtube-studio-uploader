@@ -161,7 +161,7 @@ export class YouTubeUploader {
       await uploadOption.click();
       console.log('[+] Clicked "Upload videos" menu item.');
 
-      // Wait for the modal dialog to attach to DOM
+      // Wait for modal dialog to attach to DOM
       const dialog = page.locator('ytcp-uploads-dialog, ytcp-full-page-dialog');
       await dialog.waitFor({ state: 'attached', timeout: 30000 });
 
@@ -170,7 +170,7 @@ export class YouTubeUploader {
       await fileInput.setInputFiles(fullVideoPath);
       console.log('[+] File payload dispatched! Upload in progress...');
 
-      // Wait for the Details title input box
+      // Wait for Details/Title box
       console.log('[+] Waiting for metadata editor fields...');
       const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]').first();
       await titleBox.waitFor({ state: 'visible', timeout: 60000 });
@@ -205,16 +205,16 @@ export class YouTubeUploader {
         }
       }
 
-      // Made for Kids setting
+      // Made for Kids setting - scroll into view and click safely
       console.log('[+] Setting Audience options...');
-      const notForKidsRadio = page.locator('tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("No, it\'s not made for kids")').first();
-      const forKidsRadio = page.locator('tp-yt-paper-radio-button[name="MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("Yes, it\'s made for kids")').first();
+      const notForKidsRadio = page.locator('tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"], ytcp-video-metadata-editor-audience tp-yt-paper-radio-button:has-text("No"), tp-yt-paper-radio-button:has-text("No, it\'s not made for kids")').first();
+      const forKidsRadio = page.locator('tp-yt-paper-radio-button[name="MADE_FOR_KIDS"], ytcp-video-metadata-editor-audience tp-yt-paper-radio-button:has-text("Yes"), tp-yt-paper-radio-button:has-text("Yes, it\'s made for kids")').first();
       
-      if (opts.isMadeForKids) {
-        await forKidsRadio.click().catch(() => {});
-      } else {
-        await notForKidsRadio.click().catch(() => {});
-      }
+      try {
+        const targetRadio = opts.isMadeForKids ? forKidsRadio : notForKidsRadio;
+        await targetRadio.scrollIntoViewIfNeeded().catch(() => {});
+        await targetRadio.click({ timeout: 5000, force: true }).catch(() => {});
+      } catch {}
       await page.waitForTimeout(1000);
 
       // Tags
@@ -222,7 +222,7 @@ export class YouTubeUploader {
         console.log(`[+] Adding tags: ${opts.tags.join(', ')}`);
         const showMoreBtn = page.locator('#toggle-button, ytcp-button:has-text("Show more")').first();
         if (await showMoreBtn.isVisible().catch(() => false)) {
-          await showMoreBtn.click();
+          await showMoreBtn.click({ force: true }).catch(() => {});
           await page.waitForTimeout(500);
         }
 
@@ -249,9 +249,9 @@ export class YouTubeUploader {
       console.log('[+] Advancing wizard steps (Details -> Video elements -> Checks -> Visibility)...');
       const nextBtn = page.locator('#next-button, ytcp-button#next-button').first();
 
-      for (let i = 0; i < 3; i++) {
+      for (let i = 1; i <= 3; i++) {
         if (await nextBtn.isVisible().catch(() => false)) {
-          await nextBtn.click();
+          await nextBtn.click({ force: true });
           await page.waitForTimeout(1500);
         }
       }
@@ -262,17 +262,17 @@ export class YouTubeUploader {
 
       const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility.toUpperCase()}"]`).first();
       if (await visibilityRadio.isVisible().catch(() => false)) {
-        await visibilityRadio.click();
+        await visibilityRadio.click({ force: true });
       } else {
         const textRadio = page.locator(`tp-yt-paper-radio-button:has-text("${visibility}")`).first();
-        await textRadio.click().catch(() => {});
+        await textRadio.click({ force: true }).catch(() => {});
       }
       await page.waitForTimeout(1000);
 
       // Save / Publish
       console.log('[+] Publishing video...');
       const doneBtn = page.locator('#done-button, ytcp-button#done-button').first();
-      await doneBtn.click();
+      await doneBtn.click({ force: true });
 
       await page.waitForTimeout(5000);
 
