@@ -205,26 +205,28 @@ export class YouTubeUploader {
         }
       }
 
-      // Made for Kids setting - scroll into view and click safely
-      console.log('[+] Setting Audience options...');
-      const notForKidsRadio = page.locator('tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"], ytcp-video-metadata-editor-audience tp-yt-paper-radio-button:has-text("No"), tp-yt-paper-radio-button:has-text("No, it\'s not made for kids")').first();
-      const forKidsRadio = page.locator('tp-yt-paper-radio-button[name="MADE_FOR_KIDS"], ytcp-video-metadata-editor-audience tp-yt-paper-radio-button:has-text("Yes"), tp-yt-paper-radio-button:has-text("Yes, it\'s made for kids")').first();
-      
-      try {
-        const targetRadio = opts.isMadeForKids ? forKidsRadio : notForKidsRadio;
-        await targetRadio.scrollIntoViewIfNeeded().catch(() => {});
-        await targetRadio.click({ timeout: 5000, force: true }).catch(() => {});
-      } catch {}
+      // Made for Kids setting (evaluate JS directly on radio web component)
+      console.log('[+] Setting Audience options via direct DOM selection...');
+      const isKids = Boolean(opts.isMadeForKids);
+      await page.evaluate((madeForKids) => {
+        const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
+        const radio = document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) as HTMLElement;
+        if (radio) {
+          radio.click();
+        }
+      }, isKids).catch(() => {});
+
       await page.waitForTimeout(1000);
 
-      // Tags
+      // Tags (Optional)
       if (opts.tags && opts.tags.length > 0) {
         console.log(`[+] Adding tags: ${opts.tags.join(', ')}`);
-        const showMoreBtn = page.locator('#toggle-button, ytcp-button:has-text("Show more")').first();
-        if (await showMoreBtn.isVisible().catch(() => false)) {
-          await showMoreBtn.click({ force: true }).catch(() => {});
-          await page.waitForTimeout(500);
-        }
+        await page.evaluate(() => {
+          const showMore = document.querySelector('ytcp-button#toggle-button, #toggle-button') as HTMLElement;
+          if (showMore) showMore.click();
+        }).catch(() => {});
+
+        await page.waitForTimeout(500);
 
         const tagsInput = page.locator('#tags-container input#text-input, input[aria-label="Tags"]').first();
         if (await tagsInput.isVisible().catch(() => false)) {
@@ -245,34 +247,32 @@ export class YouTubeUploader {
         }
       }
 
-      // Advance through wizard steps
+      // Advance through wizard steps via DOM click
       console.log('[+] Advancing wizard steps (Details -> Video elements -> Checks -> Visibility)...');
-      const nextBtn = page.locator('#next-button, ytcp-button#next-button').first();
-
       for (let i = 1; i <= 3; i++) {
-        if (await nextBtn.isVisible().catch(() => false)) {
-          await nextBtn.click({ force: true });
-          await page.waitForTimeout(1500);
-        }
+        await page.evaluate(() => {
+          const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
+          if (btn) btn.click();
+        }).catch(() => {});
+        await page.waitForTimeout(1500);
       }
 
-      // Visibility
-      const visibility = opts.visibility || 'unlisted';
-      console.log(`[+] Setting visibility: ${visibility.toUpperCase()}`);
+      // Visibility via DOM click
+      const visibility = (opts.visibility || 'unlisted').toUpperCase();
+      console.log(`[+] Setting visibility: ${visibility}`);
+      await page.evaluate((vis) => {
+        const radio = document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) as HTMLElement;
+        if (radio) radio.click();
+      }, visibility).catch(() => {});
 
-      const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility.toUpperCase()}"]`).first();
-      if (await visibilityRadio.isVisible().catch(() => false)) {
-        await visibilityRadio.click({ force: true });
-      } else {
-        const textRadio = page.locator(`tp-yt-paper-radio-button:has-text("${visibility}")`).first();
-        await textRadio.click({ force: true }).catch(() => {});
-      }
       await page.waitForTimeout(1000);
 
-      // Save / Publish
+      // Save / Publish via DOM click
       console.log('[+] Publishing video...');
-      const doneBtn = page.locator('#done-button, ytcp-button#done-button').first();
-      await doneBtn.click({ force: true });
+      await page.evaluate(() => {
+        const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
+        if (done) done.click();
+      }).catch(() => {});
 
       await page.waitForTimeout(5000);
 
