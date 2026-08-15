@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "daemon": "tsx src/daemon.ts",
     "login": "tsx src/login.ts",
     "vps-login": "tsx src/vps-login.ts",
     "remote-debug": "tsx src/remote-debug.ts",

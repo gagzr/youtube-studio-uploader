@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { chromium, type BrowserContext, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 
 export interface UploadOptions {
   videoPath: string;
@@ -10,91 +10,51 @@ export interface UploadOptions {
   thumbnailPath?: string;
   visibility?: 'public' | 'unlisted' | 'private';
   isMadeForKids?: boolean;
-  cookiesPath?: string;
+  cdpEndpoint?: string;
   profileDir?: string;
-  headless?: boolean;
   timeoutMs?: number;
 }
 
 export class YouTubeUploader {
-  private cookiesPath: string;
-  private profileDir?: string;
-  private headless: boolean;
+  private cdpEndpoint: string;
+  private profileDir: string;
   private timeoutMs: number;
 
-  constructor(options: { cookiesPath?: string; profileDir?: string; headless?: boolean; timeoutMs?: number } = {}) {
-    this.cookiesPath = options.cookiesPath || path.resolve(process.cwd(), 'cookies.json');
+  constructor(options: { cdpEndpoint?: string; profileDir?: string; timeoutMs?: number } = {}) {
+    this.cdpEndpoint = options.cdpEndpoint || process.env.CDP_ENDPOINT || 'http://127.0.0.1:9222';
     this.profileDir = options.profileDir || path.resolve(process.cwd(), '.yt-browser-profile');
-    this.headless = options.headless ?? true;
     this.timeoutMs = options.timeoutMs ?? 300000;
   }
 
-  private async applyCookies(context: BrowserContext): Promise<boolean> {
-    if (!fs.existsSync(this.cookiesPath)) {
-      return false;
-    }
-
+  /**
+   * Connects to the existing real browser instance over CDP (Chrome DevTools Protocol),
+   * or launches one if not already running.
+   */
+  private async getBrowserContext(): Promise<{ browser?: Browser; context: BrowserContext; isAttachedCDP: boolean }> {
     try {
-      const raw = fs.readFileSync(this.cookiesPath, 'utf8');
-      const cookies = JSON.parse(raw);
-
-      if (!Array.isArray(cookies)) return false;
-
-      const validCookies: any[] = [];
-      for (const c of cookies) {
-        if (!c.name || typeof c.value !== 'string') continue;
-
-        let domain = (c.domain || '.youtube.com').split(':')[0];
-
-        let sameSite: 'Strict' | 'Lax' | 'None' | undefined = undefined;
-        if (typeof c.sameSite === 'string') {
-          const lower = c.sameSite.toLowerCase();
-          if (lower === 'lax') sameSite = 'Lax';
-          else if (lower === 'strict') sameSite = 'Strict';
-          else if (lower === 'no_restriction' || lower === 'none') sameSite = 'None';
-        }
-
-        const cookieObj: any = {
-          name: String(c.name),
-          value: String(c.value),
-          domain: domain,
-          path: c.path || '/',
-        };
-
-        if (sameSite) cookieObj.sameSite = sameSite;
-        if (typeof c.secure === 'boolean') cookieObj.secure = c.secure;
-        if (typeof c.httpOnly === 'boolean') cookieObj.httpOnly = c.httpOnly;
-
-        const expiry = c.expires ?? c.expirationDate;
-        if (typeof expiry === 'number' && expiry > 0) {
-          cookieObj.expires = expiry > 10000000000 ? Math.floor(expiry / 1000) : Math.floor(expiry);
-        }
-
-        validCookies.push(cookieObj);
-      }
-
-      let loadedCount = 0;
-      for (const cookie of validCookies) {
-        try {
-          await context.addCookies([cookie]);
-          loadedCount++;
-        } catch {
-          try {
-            await context.addCookies([{
-              name: cookie.name,
-              value: cookie.value,
-              domain: cookie.domain,
-              path: cookie.path,
-            }]);
-            loadedCount++;
-          } catch {}
-        }
-      }
-
-      console.log(`[+] Loaded ${loadedCount}/${validCookies.length} cookies into browser context.`);
-      return true;
+      console.log(`[+] Connecting to running browser instance at: ${this.cdpEndpoint}...`);
+      const browser = await chromium.connectOverCDP(this.cdpEndpoint, { timeout: 5000 });
+      const context = browser.contexts()[0] || (await browser.newContext());
+      console.log('[+] Successfully attached to existing persistent Chrome session!');
+      return { browser, context, isAttachedCDP: true };
     } catch {
-      return false;
+      console.log(`[!] No running daemon found at ${this.cdpEndpoint}. Launching persistent context directly...`);
+      const context = await chromium.launchPersistentContext(this.profileDir, {
+        headless: true,
+        viewport: { width: 1280, height: 800 },
+        args: [
+          '--remote-debugging-port=9222',
+          '--remote-debugging-address=0.0.0.0',
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled',
+          '--no-first-run',
+          '--no-default-browser-check',
+        ],
+        ignoreDefaultArgs: ['--enable-automation'],
+      });
+      return { context, isAttachedCDP: false };
     }
   }
 
@@ -104,29 +64,10 @@ export class YouTubeUploader {
       throw new Error(`Video file does not exist at: ${fullVideoPath}`);
     }
 
-    const profilePath = path.resolve(opts.profileDir || this.profileDir!);
-    console.log(`[+] Using persistent profile storage at: ${profilePath}`);
-    console.log(`[+] Launching Chromium (headless: ${this.headless})...`);
-
-    // Let Playwright use Chromium's native modern User-Agent without spoofing outdated versions
-    const context = await chromium.launchPersistentContext(profilePath, {
-      headless: this.headless,
-      viewport: { width: 1280, height: 800 },
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--no-first-run',
-        '--no-default-browser-check',
-      ],
-      ignoreDefaultArgs: ['--enable-automation'],
-    });
+    const { browser, context, isAttachedCDP } = await this.getBrowserContext();
 
     try {
-      await this.applyCookies(context);
-
-      const page: Page = context.pages()[0] || (await context.newPage());
+      const page: Page = await context.newPage();
       page.setDefaultTimeout(this.timeoutMs);
 
       await page.addInitScript(() => {
@@ -136,20 +77,45 @@ export class YouTubeUploader {
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
 
-      // Check if redirected to security challenge or sign in
-      const currentUrl = page.url();
-      if (currentUrl.includes('signin/v2/challenge') || currentUrl.includes('challenge/pwd') || currentUrl.includes('accounts.google.com/signin')) {
+      // Check for Google Security Challenge & allow live user takeover
+      let currentUrl = page.url();
+      if (
+        currentUrl.includes('signin/v2/challenge') ||
+        currentUrl.includes('challenge') ||
+        currentUrl.includes('accounts.google.com')
+      ) {
         const challengeScreenshot = path.resolve(process.cwd(), 'security-challenge.png');
         await page.screenshot({ path: challengeScreenshot, fullPage: true }).catch(() => {});
-        throw new Error(
-          `Google Security Challenge Triggered ("Verify it's you").\n` +
-          `A screenshot was saved to: ${challengeScreenshot}\n` +
-          `👉 Run 'npm run remote-debug' on VPS and open chrome://inspect to complete the prompt.`
-        );
+
+        console.log('\n===========================================================');
+        console.log('⚠️  GOOGLE VERIFICATION PROMPT DETECTED ("Verify it\'s you")');
+        console.log('===========================================================');
+        console.log(`📸 Screenshot saved to: ${challengeScreenshot}`);
+        console.log('👉 TAKE OVER THE SESSION:');
+        console.log('   1. Forward port 9222 from your PC: ssh -L 9222:127.0.0.1:9222 root@YOUR_VPS_IP');
+        console.log('   2. Open Chrome on PC -> chrome://inspect -> Click "inspect" on YouTube Studio.');
+        console.log('   3. Solve the 2FA prompt on your screen.');
+        console.log('⏳ Pausing execution for up to 2 minutes waiting for verification to complete...\n');
+
+        // Poll every 3 seconds for 2 minutes to see if user solved verification
+        let verified = false;
+        for (let wait = 0; wait < 40; wait++) {
+          await page.waitForTimeout(3000);
+          currentUrl = page.url();
+          if (currentUrl.includes('studio.youtube.com') && !currentUrl.includes('accounts.google.com')) {
+            verified = true;
+            console.log('✅ Google Verification complete! Resuming automated upload...\n');
+            break;
+          }
+        }
+
+        if (!verified) {
+          throw new Error('Timed out waiting for manual verification takeover.');
+        }
       }
 
       console.log(`[+] Authenticated into YouTube Studio URL: ${currentUrl}`);
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(2000);
 
       // Open Create -> Upload Dialog
       console.log('[+] Opening Upload Dialog...');
@@ -177,7 +143,7 @@ export class YouTubeUploader {
       const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]').first();
       await titleBox.waitFor({ state: 'attached', timeout: 60000 });
 
-      // Set Title via DOM directly and trigger input events
+      // Set Title
       console.log(`[+] Setting title: "${opts.title}"`);
       await page.evaluate((newTitle) => {
         const titleEl = document.querySelector('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]') as HTMLElement;
@@ -226,9 +192,7 @@ export class YouTubeUploader {
         const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
         const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) ||
           document.querySelector(`tp-yt-paper-radio-button#${radioName.toLowerCase()}`)) as HTMLElement;
-        if (radio) {
-          radio.click();
-        }
+        if (radio) radio.click();
       }, isKids).catch(() => {});
 
       await page.waitForTimeout(1500);
@@ -298,7 +262,7 @@ export class YouTubeUploader {
       console.log('[+] Finalizing upload...');
       await page.waitForTimeout(6000);
 
-      // Take debug screenshot on VPS
+      // Take debug screenshot
       const screenshotPath = path.resolve(process.cwd(), 'upload-result.png');
       try {
         await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -315,9 +279,18 @@ export class YouTubeUploader {
       return { videoId, videoUrl };
 
     } finally {
-      try {
-        await context.close().catch(() => {});
-      } catch {}
+      // If connected over CDP, we only close the tab, keeping the real browser daemon alive!
+      if (isAttachedCDP) {
+        console.log('[+] Finished upload task. Keeping persistent Chrome daemon active.');
+        try {
+          const page = context.pages()[0];
+          if (page) await page.close().catch(() => {});
+        } catch {}
+      } else {
+        try {
+          await context.close().catch(() => {});
+        } catch {}
+      }
     }
   }
 }
