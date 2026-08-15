@@ -139,7 +139,6 @@ export class YouTubeUploader {
       console.log('[+] Navigating to YouTube Studio channel dashboard...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
 
-      // Verify authentication
       const currentUrl = page.url();
       if (currentUrl.includes('accounts.google.com') || currentUrl.includes('/signin')) {
         throw new Error('Authentication failed: Cookies appear to be expired or invalid. Google redirected to Sign In.');
@@ -161,7 +160,7 @@ export class YouTubeUploader {
       await uploadOption.click();
       console.log('[+] Clicked "Upload videos" menu item.');
 
-      // Wait for modal dialog to attach to DOM
+      // Wait for modal dialog
       const dialog = page.locator('ytcp-uploads-dialog, ytcp-full-page-dialog');
       await dialog.waitFor({ state: 'attached', timeout: 30000 });
 
@@ -212,9 +211,7 @@ export class YouTubeUploader {
         const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
         const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) ||
           document.querySelector(`tp-yt-paper-radio-button#${radioName.toLowerCase()}`)) as HTMLElement;
-        if (radio) {
-          radio.click();
-        }
+        if (radio) radio.click();
       }, isKids).catch(() => {});
 
       await page.waitForTimeout(1500);
@@ -236,19 +233,14 @@ export class YouTubeUploader {
         }
       }
 
-      // Step Through Wizard
+      // Step Through Wizard Steps 1, 2, 3
       console.log('[+] Advancing through wizard steps (Details -> Video elements -> Checks -> Visibility)...');
       for (let step = 1; step <= 3; step++) {
         console.log(`[+] Progressing Step ${step}/3...`);
-        const nextButton = page.locator('#next-button, ytcp-button#next-button').first();
-        if (await nextButton.isVisible().catch(() => false)) {
-          await nextButton.click({ force: true }).catch(() => {});
-        } else {
-          await page.evaluate(() => {
-            const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
-            if (btn) btn.click();
-          }).catch(() => {});
-        }
+        await page.evaluate(() => {
+          const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
+          if (btn) btn.click();
+        }).catch(() => {});
         await page.waitForTimeout(2000);
       }
 
@@ -256,56 +248,54 @@ export class YouTubeUploader {
       const visibility = (opts.visibility || 'unlisted').toUpperCase();
       console.log(`[+] Applying visibility: ${visibility}`);
       
-      const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility}"]`).first();
-      if (await visibilityRadio.isVisible().catch(() => false)) {
-        await visibilityRadio.click({ force: true }).catch(() => {});
-      } else {
-        await page.evaluate((vis) => {
-          const radio = document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) as HTMLElement;
-          if (radio) radio.click();
-        }, visibility).catch(() => {});
-      }
+      await page.evaluate((vis) => {
+        const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) ||
+          document.querySelector(`tp-yt-paper-radio-button[name="${vis.toUpperCase()}"]`)) as HTMLElement;
+        if (radio) radio.click();
+      }, visibility).catch(() => {});
 
       await page.waitForTimeout(2000);
 
-      // Save / Publish
-      console.log('[+] Clicking Save / Publish button...');
-      const doneButton = page.locator('#done-button, ytcp-button#done-button').first();
-      if (await doneButton.isVisible().catch(() => false)) {
-        await doneButton.click({ force: true }).catch(() => {});
-      } else {
-        await page.evaluate(() => {
-          const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
-          if (done) done.click();
-        }).catch(() => {});
-      }
-
-      // Wait for completion dialog or modal to finish
-      console.log('[+] Waiting for YouTube server to register video draft...');
-      await page.waitForTimeout(10000);
-
-      // Extract generated video URL from confirmation dialog or page
+      // Extract generated video URL before closing dialog
       let videoUrl: string | undefined;
       let videoId: string | undefined;
 
       try {
-        const linkElem = page.locator('a.ytcp-video-info, a[href*="youtu.be"]').first();
-        videoUrl = (await linkElem.getAttribute('href')) || undefined;
+        videoUrl = await page.evaluate(() => {
+          const link = document.querySelector('a.ytcp-video-info, a[href*="youtu.be"]') as HTMLAnchorElement;
+          return link ? link.href : undefined;
+        });
         if (videoUrl) {
           videoId = videoUrl.split('/').pop();
+          console.log(`\n🔗 Captured Video URL: ${videoUrl}`);
         }
       } catch {}
 
+      // Save / Publish
+      console.log('[+] Clicking Save / Publish button...');
+      await page.evaluate(() => {
+        const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
+        if (done) done.click();
+      }).catch(() => {});
+
+      console.log('[+] Finalizing upload...');
+      await page.waitForTimeout(4000);
+
+      console.log('\n===========================================================');
       console.log('🎉 [SUCCESS] Video successfully registered & published on YouTube Studio!');
       if (videoUrl) {
         console.log(`👉 Direct Video URL: ${videoUrl}`);
       }
+      console.log('===========================================================\n');
 
       return { videoId, videoUrl };
 
     } finally {
-      await context.close();
-      await browser.close();
+      // Clean browser shutdown
+      try {
+        await context.close().catch(() => {});
+        await browser.close().catch(() => {});
+      } catch {}
     }
   }
 }
