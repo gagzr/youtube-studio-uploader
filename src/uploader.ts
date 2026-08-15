@@ -294,31 +294,37 @@ export class YouTubeUploader {
 
       await page.waitForTimeout(2000);
 
-      // Extract generated video URL before closing dialog
+      // Extract generated video URL before closing dialog (from visibility screen or sidebar)
       let videoUrl: string | undefined;
       let videoId: string | undefined;
 
-      try {
-        videoUrl = await page.evaluate(() => {
-          // 1. Check direct video link anchor
-          const link = (document.querySelector('a.ytcp-video-info, a[href*="youtu.be"], a.ytcp-video-metadata-info[href*="youtu.be"], ytcp-video-info a') ||
-            document.querySelector('a[href*="youtube.com/watch"]')) as HTMLAnchorElement;
-          if (link && link.href) return link.href;
+      const extractUrlFromPage = async (): Promise<string | undefined> => {
+        return await page.evaluate(() => {
+          // 1. Check anchor elements
+          const link = document.querySelector('a.ytcp-video-info, a[href*="youtu.be"], a.ytcp-video-metadata-info[href*="youtu.be"], ytcp-video-info a, a.ytcp-video-list-cell-video') as HTMLAnchorElement;
+          if (link && link.href && link.href.includes('youtu.be/')) return link.href;
 
-          // 2. Check text spans containing youtu.be
-          const span = Array.from(document.querySelectorAll('span, div, a')).find(el => el.textContent && el.textContent.includes('youtu.be/'));
-          if (span && span.textContent) {
-            const match = span.textContent.match(/https?:\/\/youtu\.be\/[a-zA-Z0-9_-]+/);
+          // 2. Check for youtu.be anywhere in text nodes
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node: Node | null;
+          while ((node = walker.nextNode())) {
+            const val = node.nodeValue || '';
+            const match = val.match(/https?:\/\/youtu\.be\/[a-zA-Z0-9_-]{8,}/);
             if (match) return match[0];
           }
+
+          // 3. Check for video ID attributes
+          const elWithId = document.querySelector('[video-id], [data-video-id]');
+          if (elWithId) {
+            const id = elWithId.getAttribute('video-id') || elWithId.getAttribute('data-video-id');
+            if (id) return `https://youtu.be/${id}`;
+          }
+
           return undefined;
         });
+      };
 
-        if (videoUrl) {
-          videoId = videoUrl.split('/').pop();
-          console.log(`\n🔗 Video URL Captured: ${videoUrl}`);
-        }
-      } catch {}
+      videoUrl = await extractUrlFromPage();
 
       // Save / Publish
       console.log('[+] Clicking Save / Publish button...');
@@ -328,7 +334,17 @@ export class YouTubeUploader {
       }).catch(() => {});
 
       console.log('[+] Finalizing upload...');
-      await page.waitForTimeout(6000);
+      await page.waitForTimeout(4000);
+
+      // Extract again from the post-publish confirmation dialog (e.g. "Video published" modal)
+      if (!videoUrl) {
+        videoUrl = await extractUrlFromPage();
+      }
+
+      if (videoUrl) {
+        videoId = videoUrl.split('/').pop();
+        console.log(`\n🔗 Video URL Captured: ${videoUrl}`);
+      }
 
       // Take debug screenshot
       const uploadResultScreenshot = path.resolve(process.cwd(), 'upload-result.png');
