@@ -72,26 +72,30 @@ export class YouTubeUploader {
 
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(4000);
 
-      // Check for Google Security Challenge & allow live user takeover
+      // Check current page state
       let currentUrl = page.url();
+      console.log(`[+] Current Page URL: ${currentUrl}`);
+
+      // Save diagnostic screenshot of the initial page state
+      const stateScreenshot = path.resolve(process.cwd(), 'vps-state.png');
+      try {
+        await page.screenshot({ path: stateScreenshot, fullPage: true });
+        console.log(`📸 Diagnostic snapshot saved to: ${stateScreenshot}`);
+      } catch {}
+
       if (
         currentUrl.includes('signin/v2/challenge') ||
         currentUrl.includes('challenge') ||
         currentUrl.includes('accounts.google.com')
       ) {
-        const challengeScreenshot = path.resolve(process.cwd(), 'security-challenge.png');
-        await page.screenshot({ path: challengeScreenshot, fullPage: true }).catch(() => {});
-
         console.log('\n===========================================================');
         console.log('⚠️  GOOGLE VERIFICATION PROMPT DETECTED ("Verify it\'s you")');
         console.log('===========================================================');
-        console.log(`📸 Screenshot saved to: ${challengeScreenshot}`);
-        console.log('👉 TAKE OVER THE SESSION:');
-        console.log('   1. Forward port 9222 from your PC: ssh -L 9222:127.0.0.1:9222 root@YOUR_VPS_IP');
-        console.log('   2. Open Chrome on PC -> chrome://inspect -> Click "inspect" on YouTube Studio.');
-        console.log('   3. Solve the 2FA prompt on your screen.');
-        console.log('⏳ Pausing execution for up to 2 minutes waiting for verification to complete...\n');
+        console.log(`📸 Screenshot saved to: ${stateScreenshot}`);
+        console.log('👉 Open chrome://inspect from your PC to solve the 2FA prompt.');
+        console.log('⏳ Pausing execution for 2 minutes...\n');
 
         let verified = false;
         for (let wait = 0; wait < 40; wait++) {
@@ -99,7 +103,7 @@ export class YouTubeUploader {
           currentUrl = page.url();
           if (currentUrl.includes('studio.youtube.com') && !currentUrl.includes('accounts.google.com')) {
             verified = true;
-            console.log('✅ Google Verification complete! Resuming automated upload...\n');
+            console.log('✅ Google Verification complete! Resuming upload...\n');
             break;
           }
         }
@@ -109,46 +113,46 @@ export class YouTubeUploader {
         }
       }
 
-      console.log(`[+] Authenticated into YouTube Studio URL: ${currentUrl}`);
-      await page.waitForTimeout(3000);
-
-      // Open Create -> Upload Dialog
       console.log('[+] Opening Upload Dialog...');
-      
-      // Try multiple selectors for Create button (Header icon or direct upload widget)
-      const opened = await page.evaluate(() => {
-        const createBtn = document.querySelector('#create-icon, button[aria-label="Create"], ytcp-button#create-icon, ytcp-button#upload-icon') as HTMLElement;
-        if (createBtn) {
-          createBtn.click();
-          return true;
-        }
-        return false;
-      });
 
-      if (!opened) {
-        const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon, #upload-icon').first();
-        await createButton.waitFor({ state: 'attached', timeout: 30000 });
-        await createButton.click({ force: true });
+      // Try multiple methods to trigger upload dialog:
+      // 1. Direct evaluation on #create-icon or #upload-icon
+      // 2. Click upload button
+      // 3. Fallback to direct file injection if upload dialog already open
+      let modalOpened = false;
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        modalOpened = await page.evaluate(() => {
+          // Look for create button or upload icon
+          const btn = (document.querySelector('#create-icon, button[aria-label="Create"], ytcp-button#create-icon, #upload-icon, ytcp-button#upload-icon') ||
+            document.querySelector('ytcp-button:has-text("Upload")')) as HTMLElement;
+          if (btn) {
+            btn.click();
+            return true;
+          }
+          return false;
+        });
+
+        if (modalOpened) {
+          await page.waitForTimeout(1000);
+          // Click "Upload videos" menu item
+          await page.evaluate(() => {
+            const item = document.querySelector('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0') as HTMLElement;
+            if (item) item.click();
+          }).catch(() => {});
+          break;
+        }
+        await page.waitForTimeout(2000);
       }
 
-      await page.waitForTimeout(1000);
-
-      // Click "Upload videos" option from dropdown menu if dropdown appeared
-      await page.evaluate(() => {
-        const uploadOption = document.querySelector('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0') as HTMLElement;
-        if (uploadOption) uploadOption.click();
-      }).catch(() => {});
-
-      // Wait for modal dialog
-      const dialog = page.locator('ytcp-uploads-dialog, ytcp-full-page-dialog');
-      await dialog.waitFor({ state: 'attached', timeout: 30000 });
-
+      // Check if dialog exists, or wait for it
       console.log(`[+] Attaching video file: ${path.basename(fullVideoPath)}...`);
-      const fileInput = page.locator('ytcp-uploads-dialog input[type="file"], input[type="file"][name="Filedata"], input[type="file"]').first();
+      const fileInput = page.locator('input[type="file"][name="Filedata"], ytcp-uploads-dialog input[type="file"], input[type="file"]').first();
+      await fileInput.waitFor({ state: 'attached', timeout: 30000 });
       await fileInput.setInputFiles(fullVideoPath);
       console.log('[+] File payload dispatched! Upload in progress...');
 
-      // Wait for Details/Title box (attached state)
+      // Wait for Details/Title box
       console.log('[+] Waiting for metadata editor fields...');
       const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]').first();
       await titleBox.waitFor({ state: 'attached', timeout: 60000 });
@@ -274,11 +278,11 @@ export class YouTubeUploader {
       console.log('[+] Finalizing upload...');
       await page.waitForTimeout(6000);
 
-      // Take debug screenshot
-      const screenshotPath = path.resolve(process.cwd(), 'upload-result.png');
+      // Take final upload confirmation screenshot
+      const uploadResultScreenshot = path.resolve(process.cwd(), 'upload-result.png');
       try {
-        await page.screenshot({ path: screenshotPath, fullPage: true });
-        console.log(`[+] Saved confirmation screenshot to: ${screenshotPath}`);
+        await page.screenshot({ path: uploadResultScreenshot, fullPage: true });
+        console.log(`[+] Saved confirmation screenshot to: ${uploadResultScreenshot}`);
       } catch {}
 
       console.log('\n===========================================================');
