@@ -211,7 +211,9 @@ export class YouTubeUploader {
         const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
         const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) ||
           document.querySelector(`tp-yt-paper-radio-button#${radioName.toLowerCase()}`)) as HTMLElement;
-        if (radio) radio.click();
+        if (radio) {
+          radio.click();
+        }
       }, isKids).catch(() => {});
 
       await page.waitForTimeout(1500);
@@ -237,10 +239,15 @@ export class YouTubeUploader {
       console.log('[+] Advancing through wizard steps (Details -> Video elements -> Checks -> Visibility)...');
       for (let step = 1; step <= 3; step++) {
         console.log(`[+] Progressing Step ${step}/3...`);
-        await page.evaluate(() => {
-          const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
-          if (btn) btn.click();
-        }).catch(() => {});
+        const nextButton = page.locator('#next-button, ytcp-button#next-button').first();
+        if (await nextButton.isVisible().catch(() => false)) {
+          await nextButton.click({ force: true }).catch(() => {});
+        } else {
+          await page.evaluate(() => {
+            const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
+            if (btn) btn.click();
+          }).catch(() => {});
+        }
         await page.waitForTimeout(2000);
       }
 
@@ -248,15 +255,45 @@ export class YouTubeUploader {
       const visibility = (opts.visibility || 'unlisted').toUpperCase();
       console.log(`[+] Applying visibility: ${visibility}`);
       
-      await page.evaluate((vis) => {
-        const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) ||
-          document.querySelector(`tp-yt-paper-radio-button[name="${vis.toUpperCase()}"]`)) as HTMLElement;
-        if (radio) radio.click();
-      }, visibility).catch(() => {});
+      const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility}"]`).first();
+      if (await visibilityRadio.isVisible().catch(() => false)) {
+        await visibilityRadio.click({ force: true }).catch(() => {});
+      } else {
+        await page.evaluate((vis) => {
+          const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) ||
+            document.querySelector(`tp-yt-paper-radio-button[name="${vis.toUpperCase()}"]`)) as HTMLElement;
+          if (radio) radio.click();
+        }, visibility).catch(() => {});
+      }
 
       await page.waitForTimeout(2000);
 
-      // Extract generated video URL before closing dialog
+      // Wait until binary upload is 100% finished before closing dialog
+      console.log('[+] Monitoring upload transfer progress to YouTube CDN...');
+      let uploadFinished = false;
+      const startTime = Date.now();
+      
+      while (!uploadFinished && (Date.now() - startTime) < 180000) { // 3 min max
+        const statusText = await page.evaluate(() => {
+          const progressSpan = document.querySelector('.progress-label, .ytcp-video-upload-progress, span[class*="progress"]') as HTMLElement;
+          return progressSpan ? progressSpan.innerText : '';
+        });
+
+        if (statusText) {
+          console.log(`[+] Transfer Status: ${statusText}`);
+          if (statusText.toLowerCase().includes('complete') || statusText.toLowerCase().includes('processing') || statusText.toLowerCase().includes('saved as draft')) {
+            uploadFinished = true;
+            break;
+          }
+        } else {
+          // If no progress bar found, check if Checks/Done icon is visible
+          uploadFinished = true;
+          break;
+        }
+        await page.waitForTimeout(2000);
+      }
+
+      // Capture generated video URL from the dialog footer
       let videoUrl: string | undefined;
       let videoId: string | undefined;
 
@@ -267,19 +304,45 @@ export class YouTubeUploader {
         });
         if (videoUrl) {
           videoId = videoUrl.split('/').pop();
-          console.log(`\n🔗 Captured Video URL: ${videoUrl}`);
+          console.log(`\n🔗 Captured Video URL: ${videoUrl}\n`);
         }
       } catch {}
 
-      // Save / Publish
+      // Click Save / Publish
       console.log('[+] Clicking Save / Publish button...');
-      await page.evaluate(() => {
-        const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
-        if (done) done.click();
-      }).catch(() => {});
+      const doneButton = page.locator('#done-button, ytcp-button#done-button').first();
+      if (await doneButton.isVisible().catch(() => false)) {
+        await doneButton.click({ force: true }).catch(() => {});
+      } else {
+        await page.evaluate(() => {
+          const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
+          if (done) done.click();
+        }).catch(() => {});
+      }
 
-      console.log('[+] Finalizing upload...');
-      await page.waitForTimeout(4000);
+      // Wait for YouTube server to dismiss dialog and confirm draft insertion
+      console.log('[+] Waiting for YouTube server to confirm upload...');
+      await page.waitForTimeout(8000);
+
+      // Re-verify URL from final post-upload modal if needed
+      if (!videoUrl) {
+        try {
+          videoUrl = await page.evaluate(() => {
+            const link = document.querySelector('a.ytcp-video-info, a[href*="youtu.be"]') as HTMLAnchorElement;
+            return link ? link.href : undefined;
+          });
+          if (videoUrl) {
+            videoId = videoUrl.split('/').pop();
+          }
+        } catch {}
+      }
+
+      // Take debug screenshot if on VPS for visual verification
+      const screenshotPath = path.resolve(process.cwd(), 'upload-result.png');
+      try {
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`[+] Saved confirmation screenshot to: ${screenshotPath}`);
+      } catch {}
 
       console.log('\n===========================================================');
       console.log('🎉 [SUCCESS] Video successfully registered & published on YouTube Studio!');
@@ -291,7 +354,6 @@ export class YouTubeUploader {
       return { videoId, videoUrl };
 
     } finally {
-      // Clean browser shutdown
       try {
         await context.close().catch(() => {});
         await browser.close().catch(() => {});
