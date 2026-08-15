@@ -136,41 +136,42 @@ export class YouTubeUploader {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       });
 
-      console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
+      console.log('[+] Navigating to YouTube Studio channel dashboard...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
 
-      // Check if logged in
+      // Verify authentication
       const currentUrl = page.url();
       if (currentUrl.includes('accounts.google.com') || currentUrl.includes('/signin')) {
         throw new Error('Authentication failed: Cookies appear to be expired or invalid. Google redirected to Sign In.');
       }
 
       console.log('[+] Authenticated successfully into YouTube Studio.');
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(3000);
 
-      // Trigger Create / Upload Modal
-      console.log('[+] Triggering Upload Modal...');
+      // Locate Create button
+      console.log('[+] Opening Upload Dialog...');
       const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon').first();
-      if (await createButton.isVisible().catch(() => false)) {
-        await createButton.click();
-        await page.waitForTimeout(1000);
-        const uploadOption = page.locator('tp-yt-paper-item:has-text("Upload videos"), text="Upload videos"').first();
-        if (await uploadOption.isVisible().catch(() => false)) {
-          await uploadOption.click();
-        }
-      }
+      await createButton.waitFor({ state: 'visible', timeout: 30000 });
+      await createButton.click();
+      await page.waitForTimeout(1000);
 
-      // Check if upload dialog modal is open, or click Select Files
-      await page.waitForTimeout(2000);
+      // Click "Upload videos" option from dropdown menu
+      const uploadOption = page.locator('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0').first();
+      await uploadOption.waitFor({ state: 'visible', timeout: 10000 });
+      await uploadOption.click();
+      console.log('[+] Clicked "Upload videos" menu item.');
 
-      console.log(`[+] Attaching file directly: ${path.basename(fullVideoPath)}...`);
+      // Wait for the modal dialog to attach to DOM
+      const dialog = page.locator('ytcp-uploads-dialog, ytcp-full-page-dialog');
+      await dialog.waitFor({ state: 'attached', timeout: 30000 });
 
-      // Set input file on the hidden file input element inside ytcp-uploads-dialog or root document
-      const fileInput = page.locator('input[type="file"]').first();
+      console.log(`[+] Attaching video file: ${path.basename(fullVideoPath)}...`);
+      const fileInput = page.locator('ytcp-uploads-dialog input[type="file"], input[type="file"][name="Filedata"], input[type="file"]').first();
       await fileInput.setInputFiles(fullVideoPath);
-      console.log('[+] File payload dispatched. Waiting for YouTube processing wizard...');
+      console.log('[+] File payload dispatched! Upload in progress...');
 
       // Wait for the Details title input box
+      console.log('[+] Waiting for metadata editor fields...');
       const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]').first();
       await titleBox.waitFor({ state: 'visible', timeout: 60000 });
 
@@ -244,8 +245,8 @@ export class YouTubeUploader {
         }
       }
 
-      // Navigate wizard
-      console.log('[+] Advancing wizard steps...');
+      // Advance through wizard steps
+      console.log('[+] Advancing wizard steps (Details -> Video elements -> Checks -> Visibility)...');
       const nextBtn = page.locator('#next-button, ytcp-button#next-button').first();
 
       for (let i = 0; i < 3; i++) {
