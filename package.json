@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "login": "tsx src/login.ts",
+    "vps-login": "tsx src/vps-login.ts",
     "upload": "tsx src/cli.ts",
     "start": "tsx src/cli.ts"
   },
