@@ -145,30 +145,48 @@ export class YouTubeUploader {
 
       console.log('[+] Opening Upload Dialog...');
 
-      // Robust trigger for Create button or Upload button
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const opened = await page.evaluate(() => {
-          const btn = (document.querySelector('#create-icon, button[aria-label="Create"], ytcp-button#create-icon, #upload-icon, ytcp-button#upload-icon') ||
-            document.querySelector('ytcp-button:has-text("Upload")')) as HTMLElement;
-          if (btn) {
-            btn.click();
-            return true;
-          }
-          return false;
+      // Step 1: Wait for Create button to actually be visible in the DOM
+      const createBtn = page.locator('#create-icon, ytcp-button#create-icon, button[aria-label="Create"]').first();
+      try {
+        await createBtn.waitFor({ state: 'visible', timeout: 20000 });
+        await createBtn.click();
+        console.log('[+] Clicked Create button.');
+      } catch {
+        // Fallback: force click via evaluate
+        console.log('[!] Create button not visible, trying force evaluate click...');
+        await page.evaluate(() => {
+          const btn = document.querySelector('#create-icon, ytcp-button#create-icon') as HTMLElement;
+          if (btn) btn.click();
         });
-
-        if (opened) {
-          await page.waitForTimeout(1000);
-          await page.evaluate(() => {
-            const item = document.querySelector('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0') as HTMLElement;
-            if (item) item.click();
-          }).catch(() => {});
-          break;
-        }
-        await page.waitForTimeout(2000);
       }
 
-      // Check if dialog exists, or wait for file input
+      await page.waitForTimeout(1500);
+
+      // Take diagnostic screenshot to see if dropdown appeared
+      const afterCreateScreenshot = path.resolve(process.cwd(), 'after-create-click.png');
+      await page.screenshot({ path: afterCreateScreenshot }).catch(() => {});
+      console.log(`📸 Post-create-click snapshot: ${afterCreateScreenshot}`);
+
+      // Step 2: Click "Upload videos" from the dropdown menu
+      const uploadMenuItem = page.locator('tp-yt-paper-item:has-text("Upload videos"), #text-item-0').first();
+      try {
+        await uploadMenuItem.waitFor({ state: 'visible', timeout: 10000 });
+        await uploadMenuItem.click();
+        console.log('[+] Clicked "Upload videos" menu item.');
+      } catch {
+        await page.evaluate(() => {
+          const item = document.querySelector('tp-yt-paper-item') as HTMLElement;
+          if (item) item.click();
+        });
+      }
+
+      await page.waitForTimeout(1500);
+
+      // Take diagnostic screenshot to see if upload dialog appeared
+      const afterUploadMenuScreenshot = path.resolve(process.cwd(), 'after-upload-menu.png');
+      await page.screenshot({ path: afterUploadMenuScreenshot }).catch(() => {});
+      console.log(`📸 Post-upload-menu snapshot: ${afterUploadMenuScreenshot}`);
+
       console.log(`[+] Attaching video file: ${path.basename(fullVideoPath)}...`);
       const fileInput = page.locator('input[type="file"][name="Filedata"], ytcp-uploads-dialog input[type="file"], input[type="file"]').first();
       await fileInput.waitFor({ state: 'attached', timeout: 30000 });
