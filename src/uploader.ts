@@ -23,9 +23,13 @@ export class YouTubeUploader {
   constructor(options: { cookiesPath?: string; headless?: boolean; timeoutMs?: number } = {}) {
     this.cookiesPath = options.cookiesPath || path.resolve(process.cwd(), 'cookies.json');
     this.headless = options.headless ?? true;
-    this.timeoutMs = options.timeoutMs ?? 180000; // 3 min timeout
+    this.timeoutMs = options.timeoutMs ?? 180000;
   }
 
+  /**
+   * Robust cookie normalization supporting both Playwright dumps and browser extensions
+   * (Cookie-Editor, EditThisCookie, J2TEAM, standard Chrome DevTools JSON)
+   */
   private async applyCookies(context: BrowserContext): Promise<boolean> {
     if (!fs.existsSync(this.cookiesPath)) {
       throw new Error(`Cookies file not found at: ${this.cookiesPath}.`);
@@ -35,36 +39,83 @@ export class YouTubeUploader {
       const raw = fs.readFileSync(this.cookiesPath, 'utf8');
       const cookies = JSON.parse(raw);
 
-      if (Array.isArray(cookies)) {
-        // Clean cookie objects for Playwright compatibility
-        const validCookies = cookies.map((c: any) => {
-          const cookie: any = {
-            name: c.name,
-            value: c.value,
-            domain: c.domain?.startsWith('.') ? c.domain : `.${c.domain || 'youtube.com'}`,
-            path: c.path || '/',
-          };
-          if (c.sameSite && ['Strict', 'Lax', 'None'].includes(c.sameSite)) {
-            cookie.sameSite = c.sameSite;
-          }
-          if (typeof c.secure === 'boolean') {
-            cookie.secure = c.secure;
-          }
-          if (typeof c.httpOnly === 'boolean') {
-            cookie.httpOnly = c.httpOnly;
-          }
-          if (c.expirationDate && typeof c.expirationDate === 'number') {
-            cookie.expires = c.expirationDate;
-          }
-          return cookie;
-        });
-
-        await context.addCookies(validCookies);
-        console.log(`[+] Successfully loaded ${validCookies.length} cookies from ${path.basename(this.cookiesPath)}`);
-        return true;
-      } else {
-        throw new Error('Cookies JSON must be an array.');
+      if (!Array.isArray(cookies)) {
+        throw new Error('Cookies JSON must be an array of cookie objects.');
       }
+
+      const validCookies: any[] = [];
+
+      for (const c of cookies) {
+        if (!c.name || typeof c.value !== 'string') continue;
+
+        let domain = c.domain || '.youtube.com';
+        
+        // Remove port numbers from domain if present (e.g., localhost:3000)
+        domain = domain.split(':')[0];
+
+        // Format SameSite value to match Playwright's strict enum
+        let sameSite: 'Strict' | 'Lax' | 'None' | undefined = undefined;
+        if (typeof c.sameSite === 'string') {
+          const lower = c.sameSite.toLowerCase();
+          if (lower === 'lax') sameSite = 'Lax';
+          else if (lower === 'strict') sameSite = 'Strict';
+          else if (lower === 'no_restriction' || lower === 'none') sameSite = 'None';
+        }
+
+        const cookieObj: any = {
+          name: String(c.name),
+          value: String(c.value),
+          domain: domain,
+          path: c.path || '/',
+        };
+
+        if (sameSite) {
+          cookieObj.sameSite = sameSite;
+        }
+        if (typeof c.secure === 'boolean') {
+          cookieObj.secure = c.secure;
+        }
+        if (typeof c.httpOnly === 'boolean') {
+          cookieObj.httpOnly = c.httpOnly;
+        }
+
+        // Handle expiration (Playwright uses 'expires' as Unix timestamp in seconds)
+        const expiry = c.expires ?? c.expirationDate;
+        if (typeof expiry === 'number' && expiry > 0) {
+          // If in milliseconds, convert to seconds
+          cookieObj.expires = expiry > 10000000000 ? Math.floor(expiry / 1000) : Math.floor(expiry);
+        }
+
+        validCookies.push(cookieObj);
+      }
+
+      if (validCookies.length === 0) {
+        throw new Error('No valid cookies found in cookies.json.');
+      }
+
+      // Add cookies one by one with fallback to avoid single invalid field breaking the whole batch
+      let loadedCount = 0;
+      for (const cookie of validCookies) {
+        try {
+          await context.addCookies([cookie]);
+          loadedCount++;
+        } catch {
+          // Retry without optional fields (like sameSite or expires) if CDP rejects
+          try {
+            await context.addCookies([{
+              name: cookie.name,
+              value: cookie.value,
+              domain: cookie.domain,
+              path: cookie.path,
+            }]);
+            loadedCount++;
+          } catch {}
+        }
+      }
+
+      console.log(`[+] Successfully loaded ${loadedCount}/${validCookies.length} cookies from ${path.basename(this.cookiesPath)}`);
+      return true;
+
     } catch (err: any) {
       throw new Error(`Failed to parse cookies: ${err.message}`);
     }
@@ -127,16 +178,14 @@ export class YouTubeUploader {
           await uploadOption.click();
         }
       } else {
-        // Direct upload button on channel dashboard
         const uploadBtnDirect = page.locator('#upload-icon, ytcp-button#upload-icon, button:has-text("Upload videos")').first();
         if (await uploadBtnDirect.isVisible({ timeout: 3000 }).catch(() => false)) {
           await uploadBtnDirect.click();
         }
       }
 
-      console.log(`[+] Setting file payload: ${path.basename(fullVideoPath)}...`);
+      console.log(`[+] Attaching video file: ${path.basename(fullVideoPath)}...`);
       
-      // Look for the file input element in the upload dialog and attach file directly
       const fileInput = page.locator('input[type="file"][name="Filedata"], input[type="file"]').first();
       await fileInput.waitFor({ state: 'attached', timeout: 30000 });
       await fileInput.setInputFiles(fullVideoPath);
@@ -246,7 +295,6 @@ export class YouTubeUploader {
       const doneBtn = page.locator('#done-button, ytcp-button#done-button').first();
       await doneBtn.click();
 
-      // Wait for completion dialog or modal to finish
       await page.waitForTimeout(5000);
 
       console.log('🎉 [SUCCESS] Video upload complete!');
