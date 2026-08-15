@@ -23,7 +23,7 @@ export class YouTubeUploader {
   constructor(options: { cookiesPath?: string; headless?: boolean; timeoutMs?: number } = {}) {
     this.cookiesPath = options.cookiesPath || path.resolve(process.cwd(), 'cookies.json');
     this.headless = options.headless ?? true;
-    this.timeoutMs = options.timeoutMs ?? 300000; // 5 min timeout
+    this.timeoutMs = options.timeoutMs ?? 300000;
   }
 
   private async applyCookies(context: BrowserContext): Promise<boolean> {
@@ -145,7 +145,6 @@ export class YouTubeUploader {
         throw new Error('Authentication failed: Cookies appear to be expired or invalid. Google redirected to Sign In.');
       }
 
-      // Log current Channel ID / URL
       console.log(`[+] Authenticated into YouTube Studio URL: ${currentUrl}`);
       await page.waitForTimeout(3000);
 
@@ -207,17 +206,18 @@ export class YouTubeUploader {
       }
 
       // Made for Kids setting
-      console.log('[+] Setting Audience options via direct DOM selection...');
+      console.log('[+] Selecting Audience option (Not Made for Kids)...');
       const isKids = Boolean(opts.isMadeForKids);
       await page.evaluate((madeForKids) => {
         const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
-        const radio = document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) as HTMLElement;
+        const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) ||
+          document.querySelector(`tp-yt-paper-radio-button#${radioName.toLowerCase()}`)) as HTMLElement;
         if (radio) {
           radio.click();
         }
       }, isKids).catch(() => {});
 
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1500);
 
       // Tags (Optional)
       if (opts.tags && opts.tags.length > 0) {
@@ -236,66 +236,69 @@ export class YouTubeUploader {
         }
       }
 
-      // Capture Generated Video Link
+      // Step Through Wizard
+      console.log('[+] Advancing through wizard steps (Details -> Video elements -> Checks -> Visibility)...');
+      for (let step = 1; step <= 3; step++) {
+        console.log(`[+] Progressing Step ${step}/3...`);
+        const nextButton = page.locator('#next-button, ytcp-button#next-button').first();
+        if (await nextButton.isVisible().catch(() => false)) {
+          await nextButton.click({ force: true }).catch(() => {});
+        } else {
+          await page.evaluate(() => {
+            const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
+            if (btn) btn.click();
+          }).catch(() => {});
+        }
+        await page.waitForTimeout(2000);
+      }
+
+      // Visibility Selection
+      const visibility = (opts.visibility || 'unlisted').toUpperCase();
+      console.log(`[+] Applying visibility: ${visibility}`);
+      
+      const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility}"]`).first();
+      if (await visibilityRadio.isVisible().catch(() => false)) {
+        await visibilityRadio.click({ force: true }).catch(() => {});
+      } else {
+        await page.evaluate((vis) => {
+          const radio = document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) as HTMLElement;
+          if (radio) radio.click();
+        }, visibility).catch(() => {});
+      }
+
+      await page.waitForTimeout(2000);
+
+      // Save / Publish
+      console.log('[+] Clicking Save / Publish button...');
+      const doneButton = page.locator('#done-button, ytcp-button#done-button').first();
+      if (await doneButton.isVisible().catch(() => false)) {
+        await doneButton.click({ force: true }).catch(() => {});
+      } else {
+        await page.evaluate(() => {
+          const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
+          if (done) done.click();
+        }).catch(() => {});
+      }
+
+      // Wait for completion dialog or modal to finish
+      console.log('[+] Waiting for YouTube server to register video draft...');
+      await page.waitForTimeout(10000);
+
+      // Extract generated video URL from confirmation dialog or page
       let videoUrl: string | undefined;
       let videoId: string | undefined;
 
-      const linkSelector = 'a.ytcp-video-info, a[href*="youtu.be"]';
       try {
-        const linkElem = page.locator(linkSelector).first();
-        await linkElem.waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
+        const linkElem = page.locator('a.ytcp-video-info, a[href*="youtu.be"]').first();
         videoUrl = (await linkElem.getAttribute('href')) || undefined;
         if (videoUrl) {
           videoId = videoUrl.split('/').pop();
-          console.log(`\n🔗 Permanent Video URL: ${videoUrl}\n`);
         }
       } catch {}
 
-      // Advance through wizard steps
-      console.log('[+] Advancing wizard steps (Details -> Video elements -> Checks -> Visibility)...');
-      for (let i = 1; i <= 3; i++) {
-        await page.evaluate(() => {
-          const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
-          if (btn) btn.click();
-        }).catch(() => {});
-        await page.waitForTimeout(1500);
-      }
-
-      // Visibility
-      const visibility = (opts.visibility || 'unlisted').toUpperCase();
-      console.log(`[+] Setting visibility: ${visibility}`);
-      await page.evaluate((vis) => {
-        const radio = document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) as HTMLElement;
-        if (radio) radio.click();
-      }, visibility).catch(() => {});
-
-      await page.waitForTimeout(1500);
-
-      // Save / Publish
-      console.log('[+] Publishing video...');
-      await page.evaluate(() => {
-        const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
-        if (done) done.click();
-      }).catch(() => {});
-
-      // Wait for completion dialog or modal to finish
-      console.log('[+] Waiting for YouTube upload finalization...');
-      await page.waitForTimeout(8000);
-
-      // Re-query video link from the final confirmation dialog if not found earlier
-      if (!videoUrl) {
-        try {
-          const finalLink = page.locator('a.ytcp-video-info, a[href*="youtu.be"]').first();
-          videoUrl = (await finalLink.getAttribute('href')) || undefined;
-          if (videoUrl) {
-            videoId = videoUrl.split('/').pop();
-          }
-        } catch {}
-      }
-
-      console.log('🎉 [SUCCESS] Video successfully published to YouTube!');
+      console.log('🎉 [SUCCESS] Video successfully registered & published on YouTube Studio!');
       if (videoUrl) {
-        console.log(`👉 Direct Video Link: ${videoUrl}`);
+        console.log(`👉 Direct Video URL: ${videoUrl}`);
       }
 
       return { videoId, videoUrl };
