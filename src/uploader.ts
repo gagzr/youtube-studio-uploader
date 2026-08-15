@@ -300,12 +300,23 @@ export class YouTubeUploader {
 
       try {
         videoUrl = await page.evaluate(() => {
-          const link = document.querySelector('a.ytcp-video-info, a[href*="youtu.be"]') as HTMLAnchorElement;
-          return link ? link.href : undefined;
+          // 1. Check direct video link anchor
+          const link = (document.querySelector('a.ytcp-video-info, a[href*="youtu.be"], a.ytcp-video-metadata-info[href*="youtu.be"], ytcp-video-info a') ||
+            document.querySelector('a[href*="youtube.com/watch"]')) as HTMLAnchorElement;
+          if (link && link.href) return link.href;
+
+          // 2. Check text spans containing youtu.be
+          const span = Array.from(document.querySelectorAll('span, div, a')).find(el => el.textContent && el.textContent.includes('youtu.be/'));
+          if (span && span.textContent) {
+            const match = span.textContent.match(/https?:\/\/youtu\.be\/[a-zA-Z0-9_-]+/);
+            if (match) return match[0];
+          }
+          return undefined;
         });
+
         if (videoUrl) {
           videoId = videoUrl.split('/').pop();
-          console.log(`\n🔗 Captured Video URL: ${videoUrl}`);
+          console.log(`\n🔗 Video URL Captured: ${videoUrl}`);
         }
       } catch {}
 

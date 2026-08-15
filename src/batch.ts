@@ -187,7 +187,21 @@ async function runBatch() {
   console.log(`⏩ Skipped:   ${skippedCount}`);
   console.log(`❌ Failed:    ${failCount}`);
   console.log(`📋 Full report written to: ${historyPath}`);
-  console.log('===========================================================\n');
+  console.log('===========================================================');
+
+  if (successCount > 0 || skippedCount > 0) {
+    console.log('\n📺 Uploaded Videos Summary:');
+    console.log('-----------------------------------------------------------');
+    for (const [filePath, record] of Object.entries(history)) {
+      if (record.status === 'SUCCESS') {
+        console.log(`🎬 Title: ${record.title}`);
+        console.log(`🔗 URL:   ${record.videoUrl || 'https://studio.youtube.com'}`);
+        console.log(`📁 File:  ${filePath}`);
+        console.log('-----------------------------------------------------------');
+      }
+    }
+  }
+  console.log('\n');
 }
 
 runBatch().catch(err => {
