@@ -23,37 +23,53 @@ export class YouTubeUploader {
   constructor(options: { cookiesPath?: string; headless?: boolean; timeoutMs?: number } = {}) {
     this.cookiesPath = options.cookiesPath || path.resolve(process.cwd(), 'cookies.json');
     this.headless = options.headless ?? true;
-    this.timeoutMs = options.timeoutMs ?? 180000; // 3 min timeout for slow networks
+    this.timeoutMs = options.timeoutMs ?? 180000; // 3 min timeout
   }
 
-  /**
-   * Loads cookies into the browser context.
-   */
   private async applyCookies(context: BrowserContext): Promise<boolean> {
     if (!fs.existsSync(this.cookiesPath)) {
-      throw new Error(`Cookies file not found at: ${this.cookiesPath}. Please export your cookies to this path or run the login helper.`);
+      throw new Error(`Cookies file not found at: ${this.cookiesPath}.`);
     }
 
     try {
       const raw = fs.readFileSync(this.cookiesPath, 'utf8');
       const cookies = JSON.parse(raw);
 
-      // Playwright expects array of cookies
       if (Array.isArray(cookies)) {
-        await context.addCookies(cookies);
-        console.log(`[+] Successfully loaded ${cookies.length} cookies from ${path.basename(this.cookiesPath)}`);
+        // Clean cookie objects for Playwright compatibility
+        const validCookies = cookies.map((c: any) => {
+          const cookie: any = {
+            name: c.name,
+            value: c.value,
+            domain: c.domain?.startsWith('.') ? c.domain : `.${c.domain || 'youtube.com'}`,
+            path: c.path || '/',
+          };
+          if (c.sameSite && ['Strict', 'Lax', 'None'].includes(c.sameSite)) {
+            cookie.sameSite = c.sameSite;
+          }
+          if (typeof c.secure === 'boolean') {
+            cookie.secure = c.secure;
+          }
+          if (typeof c.httpOnly === 'boolean') {
+            cookie.httpOnly = c.httpOnly;
+          }
+          if (c.expirationDate && typeof c.expirationDate === 'number') {
+            cookie.expires = c.expirationDate;
+          }
+          return cookie;
+        });
+
+        await context.addCookies(validCookies);
+        console.log(`[+] Successfully loaded ${validCookies.length} cookies from ${path.basename(this.cookiesPath)}`);
         return true;
       } else {
-        throw new Error('Cookies JSON must be an array of cookie objects.');
+        throw new Error('Cookies JSON must be an array.');
       }
     } catch (err: any) {
       throw new Error(`Failed to parse cookies: ${err.message}`);
     }
   }
 
-  /**
-   * Main upload execution method
-   */
   public async upload(opts: UploadOptions): Promise<{ videoId?: string; videoUrl?: string }> {
     const fullVideoPath = path.resolve(opts.videoPath);
     if (!fs.existsSync(fullVideoPath)) {
@@ -83,6 +99,11 @@ export class YouTubeUploader {
       const page: Page = await context.newPage();
       page.setDefaultTimeout(this.timeoutMs);
 
+      // Mask automation flags
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      });
+
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'domcontentloaded' });
 
@@ -93,145 +114,142 @@ export class YouTubeUploader {
       }
 
       console.log('[+] Authenticated successfully into YouTube Studio.');
+      await page.waitForTimeout(3000);
 
-      // Click "CREATE" or "UPLOAD VIDEOS"
+      // Open Create -> Upload Dialog
       console.log('[+] Opening upload dialog...');
-      const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon');
-      if (await createButton.isVisible({ timeout: 5000 }).catch(() => false)) {
-        await createButton.click();
-        const uploadVideosOption = page.locator('text="Upload videos"');
-        await uploadVideosOption.click();
-      }
-
-      // Handle file input
-      console.log(`[+] Selecting file: ${path.basename(fullVideoPath)}...`);
-      const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 15000 }).catch(() => null);
-      
-      const selectFilesBtn = page.locator('#select-files-button, button:has-text("Select files")');
-      if (await selectFilesBtn.isVisible().catch(() => false)) {
-        await selectFilesBtn.click();
-      }
-
-      const fileChooser = await fileChooserPromise;
-      if (fileChooser) {
-        await fileChooser.setFiles(fullVideoPath);
+      const createBtn = page.locator('#create-icon, ytcp-button#create-icon, button[aria-label="Create"]').first();
+      if (await createBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+        await createBtn.click();
+        await page.waitForTimeout(1000);
+        const uploadOption = page.locator('#text-item-0, ytcp-text-menu #text:has-text("Upload videos"), text="Upload videos"').first();
+        if (await uploadOption.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await uploadOption.click();
+        }
       } else {
-        // Fallback: direct setInputFiles on the hidden file input
-        const fileInput = page.locator('input[type="file"]');
-        await fileInput.setInputFiles(fullVideoPath);
+        // Direct upload button on channel dashboard
+        const uploadBtnDirect = page.locator('#upload-icon, ytcp-button#upload-icon, button:has-text("Upload videos")').first();
+        if (await uploadBtnDirect.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await uploadBtnDirect.click();
+        }
       }
 
-      console.log('[+] Upload started. Waiting for metadata editor...');
-      // Wait for title input field to appear
-      const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox');
-      await titleBox.waitFor({ state: 'visible', timeout: 30000 });
+      console.log(`[+] Setting file payload: ${path.basename(fullVideoPath)}...`);
+      
+      // Look for the file input element in the upload dialog and attach file directly
+      const fileInput = page.locator('input[type="file"][name="Filedata"], input[type="file"]').first();
+      await fileInput.waitFor({ state: 'attached', timeout: 30000 });
+      await fileInput.setInputFiles(fullVideoPath);
+      console.log('[+] File attached. Uploading file to YouTube...');
 
-      // Set Title
+      // Wait for Details/Title editor to populate
+      console.log('[+] Waiting for metadata editor...');
+      const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox').first();
+      await titleBox.waitFor({ state: 'visible', timeout: 60000 });
+
+      // Fill Title
       console.log(`[+] Setting title: "${opts.title}"`);
       await titleBox.click();
-      // Select all and replace
       await page.keyboard.press('Control+A');
       await page.keyboard.press('Backspace');
       await titleBox.fill(opts.title);
+      await page.waitForTimeout(1000);
 
-      // Set Description
+      // Fill Description (Optional)
       if (opts.description) {
         console.log('[+] Setting description...');
-        const descBox = page.locator('#description-textarea #textbox, #textbox[aria-label*="description" i]');
+        const descBox = page.locator('#description-textarea #textbox, #textbox[aria-label*="description" i]').first();
         if (await descBox.isVisible().catch(() => false)) {
           await descBox.click();
           await descBox.fill(opts.description);
         }
       }
 
-      // Set Thumbnail (Optional)
+      // Thumbnail (Optional)
       if (opts.thumbnailPath) {
         const thumbPath = path.resolve(opts.thumbnailPath);
         if (fs.existsSync(thumbPath)) {
-          console.log(`[+] Uploading thumbnail: ${path.basename(thumbPath)}...`);
-          const thumbInput = page.locator('input#file-loader, input[type="file"][accept*="image"]');
+          console.log(`[+] Uploading custom thumbnail: ${path.basename(thumbPath)}...`);
+          const thumbInput = page.locator('input#file-loader, input[type="file"][accept*="image"]').first();
           if (await thumbInput.count() > 0) {
             await thumbInput.setInputFiles(thumbPath);
           }
         }
       }
 
-      // "Made for kids" selection (Required by YouTube)
+      // Audience: "Made for kids"
       console.log('[+] Setting Audience options...');
-      const notForKidsRadio = page.locator('tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("No, it\'s not made for kids")');
-      const forKidsRadio = page.locator('tp-yt-paper-radio-button[name="MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("Yes, it\'s made for kids")');
+      const notForKidsRadio = page.locator('tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("No, it\'s not made for kids")').first();
+      const forKidsRadio = page.locator('tp-yt-paper-radio-button[name="MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("Yes, it\'s made for kids")').first();
       
       if (opts.isMadeForKids) {
         await forKidsRadio.click().catch(() => {});
       } else {
         await notForKidsRadio.click().catch(() => {});
       }
+      await page.waitForTimeout(1000);
 
-      // Add Tags (Show More section)
+      // Tags (Optional)
       if (opts.tags && opts.tags.length > 0) {
         console.log(`[+] Adding tags: ${opts.tags.join(', ')}`);
-        const showMoreBtn = page.locator('#toggle-button, ytcp-button:has-text("Show more")');
+        const showMoreBtn = page.locator('#toggle-button, ytcp-button:has-text("Show more")').first();
         if (await showMoreBtn.isVisible().catch(() => false)) {
           await showMoreBtn.click();
+          await page.waitForTimeout(500);
         }
 
-        const tagsInput = page.locator('#tags-container input#text-input, input[aria-label="Tags"]');
+        const tagsInput = page.locator('#tags-container input#text-input, input[aria-label="Tags"]').first();
         if (await tagsInput.isVisible().catch(() => false)) {
           await tagsInput.fill(opts.tags.join(','));
           await page.keyboard.press('Enter');
         }
       }
 
-      // Navigate through "Next" buttons (Video elements, Checks)
-      console.log('[+] Proceeding through wizard steps...');
-      const nextBtn = page.locator('#next-button');
-
-      // Click Next for Details -> Video elements
-      await nextBtn.click();
-      await page.waitForTimeout(1000);
-
-      // Click Next for Video elements -> Checks
-      await nextBtn.click();
-      await page.waitForTimeout(1000);
-
-      // Click Next for Checks -> Visibility
-      await nextBtn.click();
-      await page.waitForTimeout(1000);
-
-      // Set Visibility (Private, Unlisted, Public)
-      const visibility = opts.visibility || 'unlisted';
-      console.log(`[+] Setting visibility to: ${visibility.toUpperCase()}`);
-
-      const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility.toUpperCase()}"]`);
-      if (await visibilityRadio.isVisible().catch(() => false)) {
-        await visibilityRadio.click();
-      } else {
-        // Fallback selector by text
-        const textRadio = page.locator(`tp-yt-paper-radio-button:has-text("${visibility}")`);
-        await textRadio.click().catch(() => {});
-      }
-
-      // Grab Video Link if displayed
+      // Grab Video URL if already generated
       let videoUrl: string | undefined;
       let videoId: string | undefined;
-      const linkElem = page.locator('a.ytcp-video-info, a[href*="youtu.be"]');
+      const linkElem = page.locator('a.ytcp-video-info, a[href*="youtu.be"]').first();
       if (await linkElem.isVisible().catch(() => false)) {
         videoUrl = await linkElem.getAttribute('href') || undefined;
         if (videoUrl) {
           videoId = videoUrl.split('/').pop();
-          console.log(`[+] Video URL generated: ${videoUrl}`);
+          console.log(`[+] Generated Video URL: ${videoUrl}`);
         }
       }
 
-      // Click Save / Done
-      console.log('[+] Publishing / Saving video...');
-      const doneBtn = page.locator('#done-button, ytcp-button#done-button');
+      // Navigate Next buttons
+      console.log('[+] Navigating wizard steps (Details -> Video elements -> Checks -> Visibility)...');
+      const nextBtn = page.locator('#next-button, ytcp-button#next-button').first();
+
+      for (let step = 1; step <= 3; step++) {
+        if (await nextBtn.isVisible().catch(() => false)) {
+          await nextBtn.click();
+          await page.waitForTimeout(1500);
+        }
+      }
+
+      // Set Visibility
+      const visibility = opts.visibility || 'unlisted';
+      console.log(`[+] Setting visibility: ${visibility.toUpperCase()}`);
+
+      const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility.toUpperCase()}"]`).first();
+      if (await visibilityRadio.isVisible().catch(() => false)) {
+        await visibilityRadio.click();
+      } else {
+        const textRadio = page.locator(`tp-yt-paper-radio-button:has-text("${visibility}")`).first();
+        await textRadio.click().catch(() => {});
+      }
+      await page.waitForTimeout(1000);
+
+      // Click Done / Save
+      console.log('[+] Saving and publishing...');
+      const doneBtn = page.locator('#done-button, ytcp-button#done-button').first();
       await doneBtn.click();
 
-      // Wait for modal to close or upload confirmation dialog
-      await page.waitForTimeout(4000);
+      // Wait for completion dialog or modal to finish
+      await page.waitForTimeout(5000);
 
-      console.log('🎉 [SUCCESS] Video successfully uploaded to YouTube Studio!');
+      console.log('🎉 [SUCCESS] Video upload complete!');
       return { videoId, videoUrl };
 
     } finally {
