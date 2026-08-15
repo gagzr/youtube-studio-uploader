@@ -108,7 +108,6 @@ export class YouTubeUploader {
     console.log(`[+] Using persistent profile storage at: ${profilePath}`);
     console.log(`[+] Launching Chromium (headless: ${this.headless})...`);
 
-    // Use persistent context to retain device trust and security verification tokens
     const context = await chromium.launchPersistentContext(profilePath, {
       headless: this.headless,
       viewport: { width: 1280, height: 800 },
@@ -138,24 +137,20 @@ export class YouTubeUploader {
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
 
-      // Detect Google Security Challenge ("Verify it's you")
       const currentUrl = page.url();
       if (currentUrl.includes('challenge') || currentUrl.includes('signin/v2/challenge') || currentUrl.includes('accounts.google.com')) {
-        // Take screenshot of the verification challenge so user can identify the exact prompt
         const challengeScreenshot = path.resolve(process.cwd(), 'security-challenge.png');
         await page.screenshot({ path: challengeScreenshot, fullPage: true }).catch(() => {});
-        
         throw new Error(
           `Google Security Challenge Triggered ("Verify it's you").\n` +
-          `A screenshot of the prompt was saved to: ${challengeScreenshot}\n` +
-          `👉 Please perform the one-time proxy login or review the prompt.`
+          `A screenshot was saved to: ${challengeScreenshot}`
         );
       }
 
       console.log(`[+] Authenticated into YouTube Studio URL: ${currentUrl}`);
       await page.waitForTimeout(3000);
 
-      // Open Create -> Upload dialog
+      // Open Create -> Upload Dialog
       console.log('[+] Opening Upload Dialog...');
       const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon').first();
       await createButton.waitFor({ state: 'visible', timeout: 30000 });
@@ -176,27 +171,39 @@ export class YouTubeUploader {
       await fileInput.setInputFiles(fullVideoPath);
       console.log('[+] File payload dispatched! Upload in progress...');
 
-      // Wait for Details/Title box
+      // Wait for Details/Title box (wait for attached state instead of visible)
       console.log('[+] Waiting for metadata editor fields...');
       const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]').first();
-      await titleBox.waitFor({ state: 'visible', timeout: 60000 });
+      await titleBox.waitFor({ state: 'attached', timeout: 60000 });
 
-      // Set Title
+      // Set Title via DOM directly and trigger input events
       console.log(`[+] Setting title: "${opts.title}"`);
-      await titleBox.click();
-      await page.keyboard.press('Control+A');
-      await page.keyboard.press('Backspace');
-      await titleBox.fill(opts.title);
-      await page.waitForTimeout(1000);
+      await page.evaluate((newTitle) => {
+        const titleEl = document.querySelector('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]') as HTMLElement;
+        if (titleEl) {
+          titleEl.focus();
+          titleEl.textContent = newTitle;
+          titleEl.innerText = newTitle;
+          titleEl.dispatchEvent(new Event('input', { bubbles: true }));
+          titleEl.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, opts.title);
+
+      await page.waitForTimeout(1500);
 
       // Set Description
       if (opts.description) {
         console.log('[+] Setting description...');
-        const descBox = page.locator('#description-textarea #textbox, #textbox[aria-label*="description" i]').first();
-        if (await descBox.isVisible().catch(() => false)) {
-          await descBox.click();
-          await descBox.fill(opts.description);
-        }
+        await page.evaluate((newDesc) => {
+          const descEl = document.querySelector('#description-textarea #textbox, #textbox[aria-label*="description" i]') as HTMLElement;
+          if (descEl) {
+            descEl.focus();
+            descEl.textContent = newDesc;
+            descEl.innerText = newDesc;
+            descEl.dispatchEvent(new Event('input', { bubbles: true }));
+            descEl.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }, opts.description);
       }
 
       // Thumbnail
@@ -211,14 +218,16 @@ export class YouTubeUploader {
         }
       }
 
-      // Made for Kids
+      // Made for Kids setting
       console.log('[+] Selecting Audience option (Not Made for Kids)...');
       const isKids = Boolean(opts.isMadeForKids);
       await page.evaluate((madeForKids) => {
         const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
         const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) ||
           document.querySelector(`tp-yt-paper-radio-button#${radioName.toLowerCase()}`)) as HTMLElement;
-        if (radio) radio.click();
+        if (radio) {
+          radio.click();
+        }
       }, isKids).catch(() => {});
 
       await page.waitForTimeout(1500);
@@ -240,7 +249,7 @@ export class YouTubeUploader {
         }
       }
 
-      // Advance Steps 1, 2, 3
+      // Step Through Wizard Steps 1, 2, 3
       console.log('[+] Advancing through wizard steps (Details -> Video elements -> Checks -> Visibility)...');
       for (let step = 1; step <= 3; step++) {
         console.log(`[+] Progressing Step ${step}/3...`);
