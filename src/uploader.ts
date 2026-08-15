@@ -26,10 +26,6 @@ export class YouTubeUploader {
     this.timeoutMs = options.timeoutMs ?? 300000;
   }
 
-  /**
-   * Connects to the existing real browser instance over CDP (Chrome DevTools Protocol),
-   * or launches one if not already running.
-   */
   private async getBrowserContext(): Promise<{ browser?: Browser; context: BrowserContext; isAttachedCDP: boolean }> {
     try {
       console.log(`[+] Connecting to running browser instance at: ${this.cdpEndpoint}...`);
@@ -75,7 +71,7 @@ export class YouTubeUploader {
       });
 
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
-      await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
+      await page.goto('https://studio.youtube.com', { waitUntil: 'domcontentloaded' });
 
       // Check for Google Security Challenge & allow live user takeover
       let currentUrl = page.url();
@@ -97,7 +93,6 @@ export class YouTubeUploader {
         console.log('   3. Solve the 2FA prompt on your screen.');
         console.log('⏳ Pausing execution for up to 2 minutes waiting for verification to complete...\n');
 
-        // Poll every 3 seconds for 2 minutes to see if user solved verification
         let verified = false;
         for (let wait = 0; wait < 40; wait++) {
           await page.waitForTimeout(3000);
@@ -115,19 +110,34 @@ export class YouTubeUploader {
       }
 
       console.log(`[+] Authenticated into YouTube Studio URL: ${currentUrl}`);
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(3000);
 
       // Open Create -> Upload Dialog
       console.log('[+] Opening Upload Dialog...');
-      const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon').first();
-      await createButton.waitFor({ state: 'visible', timeout: 30000 });
-      await createButton.click();
+      
+      // Try multiple selectors for Create button (Header icon or direct upload widget)
+      const opened = await page.evaluate(() => {
+        const createBtn = document.querySelector('#create-icon, button[aria-label="Create"], ytcp-button#create-icon, ytcp-button#upload-icon') as HTMLElement;
+        if (createBtn) {
+          createBtn.click();
+          return true;
+        }
+        return false;
+      });
+
+      if (!opened) {
+        const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon, #upload-icon').first();
+        await createButton.waitFor({ state: 'attached', timeout: 30000 });
+        await createButton.click({ force: true });
+      }
+
       await page.waitForTimeout(1000);
 
-      const uploadOption = page.locator('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0').first();
-      await uploadOption.waitFor({ state: 'visible', timeout: 10000 });
-      await uploadOption.click();
-      console.log('[+] Clicked "Upload videos" menu item.');
+      // Click "Upload videos" option from dropdown menu if dropdown appeared
+      await page.evaluate(() => {
+        const uploadOption = document.querySelector('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0') as HTMLElement;
+        if (uploadOption) uploadOption.click();
+      }).catch(() => {});
 
       // Wait for modal dialog
       const dialog = page.locator('ytcp-uploads-dialog, ytcp-full-page-dialog');
@@ -192,7 +202,9 @@ export class YouTubeUploader {
         const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
         const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) ||
           document.querySelector(`tp-yt-paper-radio-button#${radioName.toLowerCase()}`)) as HTMLElement;
-        if (radio) radio.click();
+        if (radio) {
+          radio.click();
+        }
       }, isKids).catch(() => {});
 
       await page.waitForTimeout(1500);
@@ -279,7 +291,6 @@ export class YouTubeUploader {
       return { videoId, videoUrl };
 
     } finally {
-      // If connected over CDP, we only close the tab, keeping the real browser daemon alive!
       if (isAttachedCDP) {
         console.log('[+] Finished upload task. Keeping persistent Chrome daemon active.');
         try {
