@@ -11,6 +11,7 @@
     "vps-login": "tsx src/vps-login.ts",
     "remote-debug": "tsx src/remote-debug.ts",
     "upload": "tsx src/cli.ts",
+    "batch": "tsx src/batch.ts",
     "start": "tsx src/cli.ts"
   },
   "keywords": [

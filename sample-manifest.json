@@ -1,0 +1,9 @@
+[
+  {
+    "file": "/tmp/person-bicycle-car-detection.mp4",
+    "title": "Batch Test: Object Detection Run 01",
+    "description": "Automated pipeline upload batch test 1",
+    "tags": ["detection", "yolo", "cv"],
+    "visibility": "unlisted"
+  }
+]
