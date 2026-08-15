@@ -108,16 +108,15 @@ export class YouTubeUploader {
     console.log(`[+] Using persistent profile storage at: ${profilePath}`);
     console.log(`[+] Launching Chromium (headless: ${this.headless})...`);
 
+    // Let Playwright use Chromium's native modern User-Agent without spoofing outdated versions
     const context = await chromium.launchPersistentContext(profilePath, {
       headless: this.headless,
       viewport: { width: 1280, height: 800 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
         '--no-first-run',
         '--no-default-browser-check',
       ],
@@ -137,13 +136,15 @@ export class YouTubeUploader {
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
 
+      // Check if redirected to security challenge or sign in
       const currentUrl = page.url();
-      if (currentUrl.includes('challenge') || currentUrl.includes('signin/v2/challenge') || currentUrl.includes('accounts.google.com')) {
+      if (currentUrl.includes('signin/v2/challenge') || currentUrl.includes('challenge/pwd') || currentUrl.includes('accounts.google.com/signin')) {
         const challengeScreenshot = path.resolve(process.cwd(), 'security-challenge.png');
         await page.screenshot({ path: challengeScreenshot, fullPage: true }).catch(() => {});
         throw new Error(
           `Google Security Challenge Triggered ("Verify it's you").\n` +
-          `A screenshot was saved to: ${challengeScreenshot}`
+          `A screenshot was saved to: ${challengeScreenshot}\n` +
+          `👉 Run 'npm run remote-debug' on VPS and open chrome://inspect to complete the prompt.`
         );
       }
 
@@ -171,7 +172,7 @@ export class YouTubeUploader {
       await fileInput.setInputFiles(fullVideoPath);
       console.log('[+] File payload dispatched! Upload in progress...');
 
-      // Wait for Details/Title box (wait for attached state instead of visible)
+      // Wait for Details/Title box (attached state)
       console.log('[+] Waiting for metadata editor fields...');
       const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]').first();
       await titleBox.waitFor({ state: 'attached', timeout: 60000 });
