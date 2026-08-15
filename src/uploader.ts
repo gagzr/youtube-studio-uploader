@@ -26,10 +26,6 @@ export class YouTubeUploader {
     this.timeoutMs = options.timeoutMs ?? 180000;
   }
 
-  /**
-   * Robust cookie normalization supporting both Playwright dumps and browser extensions
-   * (Cookie-Editor, EditThisCookie, J2TEAM, standard Chrome DevTools JSON)
-   */
   private async applyCookies(context: BrowserContext): Promise<boolean> {
     if (!fs.existsSync(this.cookiesPath)) {
       throw new Error(`Cookies file not found at: ${this.cookiesPath}.`);
@@ -48,12 +44,8 @@ export class YouTubeUploader {
       for (const c of cookies) {
         if (!c.name || typeof c.value !== 'string') continue;
 
-        let domain = c.domain || '.youtube.com';
-        
-        // Remove port numbers from domain if present (e.g., localhost:3000)
-        domain = domain.split(':')[0];
+        let domain = (c.domain || '.youtube.com').split(':')[0];
 
-        // Format SameSite value to match Playwright's strict enum
         let sameSite: 'Strict' | 'Lax' | 'None' | undefined = undefined;
         if (typeof c.sameSite === 'string') {
           const lower = c.sameSite.toLowerCase();
@@ -69,20 +61,12 @@ export class YouTubeUploader {
           path: c.path || '/',
         };
 
-        if (sameSite) {
-          cookieObj.sameSite = sameSite;
-        }
-        if (typeof c.secure === 'boolean') {
-          cookieObj.secure = c.secure;
-        }
-        if (typeof c.httpOnly === 'boolean') {
-          cookieObj.httpOnly = c.httpOnly;
-        }
+        if (sameSite) cookieObj.sameSite = sameSite;
+        if (typeof c.secure === 'boolean') cookieObj.secure = c.secure;
+        if (typeof c.httpOnly === 'boolean') cookieObj.httpOnly = c.httpOnly;
 
-        // Handle expiration (Playwright uses 'expires' as Unix timestamp in seconds)
         const expiry = c.expires ?? c.expirationDate;
         if (typeof expiry === 'number' && expiry > 0) {
-          // If in milliseconds, convert to seconds
           cookieObj.expires = expiry > 10000000000 ? Math.floor(expiry / 1000) : Math.floor(expiry);
         }
 
@@ -93,14 +77,12 @@ export class YouTubeUploader {
         throw new Error('No valid cookies found in cookies.json.');
       }
 
-      // Add cookies one by one with fallback to avoid single invalid field breaking the whole batch
       let loadedCount = 0;
       for (const cookie of validCookies) {
         try {
           await context.addCookies([cookie]);
           loadedCount++;
         } catch {
-          // Retry without optional fields (like sameSite or expires) if CDP rejects
           try {
             await context.addCookies([{
               name: cookie.name,
@@ -150,13 +132,12 @@ export class YouTubeUploader {
       const page: Page = await context.newPage();
       page.setDefaultTimeout(this.timeoutMs);
 
-      // Mask automation flags
       await page.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       });
 
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
-      await page.goto('https://studio.youtube.com', { waitUntil: 'domcontentloaded' });
+      await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
 
       // Check if logged in
       const currentUrl = page.url();
@@ -165,38 +146,35 @@ export class YouTubeUploader {
       }
 
       console.log('[+] Authenticated successfully into YouTube Studio.');
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(2000);
 
-      // Open Create -> Upload Dialog
-      console.log('[+] Opening upload dialog...');
-      const createBtn = page.locator('#create-icon, ytcp-button#create-icon, button[aria-label="Create"]').first();
-      if (await createBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-        await createBtn.click();
+      // Trigger Create / Upload Modal
+      console.log('[+] Triggering Upload Modal...');
+      const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon').first();
+      if (await createButton.isVisible().catch(() => false)) {
+        await createButton.click();
         await page.waitForTimeout(1000);
-        const uploadOption = page.locator('#text-item-0, ytcp-text-menu #text:has-text("Upload videos"), text="Upload videos"').first();
-        if (await uploadOption.isVisible({ timeout: 3000 }).catch(() => false)) {
+        const uploadOption = page.locator('tp-yt-paper-item:has-text("Upload videos"), text="Upload videos"').first();
+        if (await uploadOption.isVisible().catch(() => false)) {
           await uploadOption.click();
-        }
-      } else {
-        const uploadBtnDirect = page.locator('#upload-icon, ytcp-button#upload-icon, button:has-text("Upload videos")').first();
-        if (await uploadBtnDirect.isVisible({ timeout: 3000 }).catch(() => false)) {
-          await uploadBtnDirect.click();
         }
       }
 
-      console.log(`[+] Attaching video file: ${path.basename(fullVideoPath)}...`);
-      
-      const fileInput = page.locator('input[type="file"][name="Filedata"], input[type="file"]').first();
-      await fileInput.waitFor({ state: 'attached', timeout: 30000 });
-      await fileInput.setInputFiles(fullVideoPath);
-      console.log('[+] File attached. Uploading file to YouTube...');
+      // Check if upload dialog modal is open, or click Select Files
+      await page.waitForTimeout(2000);
 
-      // Wait for Details/Title editor to populate
-      console.log('[+] Waiting for metadata editor...');
-      const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox').first();
+      console.log(`[+] Attaching file directly: ${path.basename(fullVideoPath)}...`);
+
+      // Set input file on the hidden file input element inside ytcp-uploads-dialog or root document
+      const fileInput = page.locator('input[type="file"]').first();
+      await fileInput.setInputFiles(fullVideoPath);
+      console.log('[+] File payload dispatched. Waiting for YouTube processing wizard...');
+
+      // Wait for the Details title input box
+      const titleBox = page.locator('#textbox[aria-label*="title" i], #title-textarea #textbox, #textbox[aria-label*="Title"]').first();
       await titleBox.waitFor({ state: 'visible', timeout: 60000 });
 
-      // Fill Title
+      // Set Title
       console.log(`[+] Setting title: "${opts.title}"`);
       await titleBox.click();
       await page.keyboard.press('Control+A');
@@ -204,7 +182,7 @@ export class YouTubeUploader {
       await titleBox.fill(opts.title);
       await page.waitForTimeout(1000);
 
-      // Fill Description (Optional)
+      // Set Description
       if (opts.description) {
         console.log('[+] Setting description...');
         const descBox = page.locator('#description-textarea #textbox, #textbox[aria-label*="description" i]').first();
@@ -214,7 +192,7 @@ export class YouTubeUploader {
         }
       }
 
-      // Thumbnail (Optional)
+      // Thumbnail
       if (opts.thumbnailPath) {
         const thumbPath = path.resolve(opts.thumbnailPath);
         if (fs.existsSync(thumbPath)) {
@@ -226,7 +204,7 @@ export class YouTubeUploader {
         }
       }
 
-      // Audience: "Made for kids"
+      // Made for Kids setting
       console.log('[+] Setting Audience options...');
       const notForKidsRadio = page.locator('tp-yt-paper-radio-button[name="NOT_MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("No, it\'s not made for kids")').first();
       const forKidsRadio = page.locator('tp-yt-paper-radio-button[name="MADE_FOR_KIDS"], tp-yt-paper-radio-button:has-text("Yes, it\'s made for kids")').first();
@@ -238,7 +216,7 @@ export class YouTubeUploader {
       }
       await page.waitForTimeout(1000);
 
-      // Tags (Optional)
+      // Tags
       if (opts.tags && opts.tags.length > 0) {
         console.log(`[+] Adding tags: ${opts.tags.join(', ')}`);
         const showMoreBtn = page.locator('#toggle-button, ytcp-button:has-text("Show more")').first();
@@ -254,7 +232,7 @@ export class YouTubeUploader {
         }
       }
 
-      // Grab Video URL if already generated
+      // Grab Video URL
       let videoUrl: string | undefined;
       let videoId: string | undefined;
       const linkElem = page.locator('a.ytcp-video-info, a[href*="youtu.be"]').first();
@@ -266,18 +244,18 @@ export class YouTubeUploader {
         }
       }
 
-      // Navigate Next buttons
-      console.log('[+] Navigating wizard steps (Details -> Video elements -> Checks -> Visibility)...');
+      // Navigate wizard
+      console.log('[+] Advancing wizard steps...');
       const nextBtn = page.locator('#next-button, ytcp-button#next-button').first();
 
-      for (let step = 1; step <= 3; step++) {
+      for (let i = 0; i < 3; i++) {
         if (await nextBtn.isVisible().catch(() => false)) {
           await nextBtn.click();
           await page.waitForTimeout(1500);
         }
       }
 
-      // Set Visibility
+      // Visibility
       const visibility = opts.visibility || 'unlisted';
       console.log(`[+] Setting visibility: ${visibility.toUpperCase()}`);
 
@@ -290,8 +268,8 @@ export class YouTubeUploader {
       }
       await page.waitForTimeout(1000);
 
-      // Click Done / Save
-      console.log('[+] Saving and publishing...');
+      // Save / Publish
+      console.log('[+] Publishing video...');
       const doneBtn = page.locator('#done-button, ytcp-button#done-button').first();
       await doneBtn.click();
 
