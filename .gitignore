@@ -1,0 +1,7 @@
+node_modules/
+dist/
+cookies.json
+*.mp4
+*.mkv
+*.webm
+.env

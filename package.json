@@ -1,0 +1,32 @@
+{
+  "name": "youtube-studio-uploader",
+  "version": "1.0.0",
+  "description": "Headless YouTube Studio uploader using Playwright and cookie authentication",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "login": "tsx src/login.ts",
+    "upload": "tsx src/cli.ts",
+    "start": "tsx src/cli.ts"
+  },
+  "keywords": [
+    "youtube",
+    "uploader",
+    "playwright",
+    "automation",
+    "vps"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.47.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}
