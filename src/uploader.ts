@@ -34,10 +34,18 @@ export class YouTubeUploader {
       console.log('[+] Successfully attached to existing persistent Chrome session!');
       return { browser, context, isAttachedCDP: true };
     } catch {
-      console.log(`[!] No running daemon found at ${this.cdpEndpoint}. Launching persistent context directly...`);
+      console.log(`[!] No running daemon found at ${this.cdpEndpoint}. Launching persistent context with stealth engine...`);
       const context = await chromium.launchPersistentContext(this.profileDir, {
         headless: true,
-        viewport: { width: 1280, height: 800 },
+        viewport: { width: 1440, height: 900 },
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        locale: 'en-US',
+        extraHTTPHeaders: {
+          'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
         args: [
           '--remote-debugging-port=9222',
           '--remote-debugging-address=0.0.0.0',
@@ -47,6 +55,7 @@ export class YouTubeUploader {
           '--disable-blink-features=AutomationControlled',
           '--no-first-run',
           '--no-default-browser-check',
+          '--window-size=1440,900',
         ],
         ignoreDefaultArgs: ['--enable-automation'],
       });
@@ -66,8 +75,15 @@ export class YouTubeUploader {
       const page: Page = await context.newPage();
       page.setDefaultTimeout(this.timeoutMs);
 
+      // Stealth Injections
       await page.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        (window as any).chrome = {
+          app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+          runtime: { OnInstalledReason: {}, OnRestartRequiredReason: {}, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {} },
+        };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
       });
 
       console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
@@ -78,7 +94,6 @@ export class YouTubeUploader {
       let currentUrl = page.url();
       console.log(`[+] Current Page URL: ${currentUrl}`);
 
-      // Save diagnostic screenshot of the initial page state
       const stateScreenshot = path.resolve(process.cwd(), 'vps-state.png');
       try {
         await page.screenshot({ path: stateScreenshot, fullPage: true });
@@ -115,15 +130,9 @@ export class YouTubeUploader {
 
       console.log('[+] Opening Upload Dialog...');
 
-      // Try multiple methods to trigger upload dialog:
-      // 1. Direct evaluation on #create-icon or #upload-icon
-      // 2. Click upload button
-      // 3. Fallback to direct file injection if upload dialog already open
-      let modalOpened = false;
-
+      // Robust trigger for Create button or Upload button
       for (let attempt = 0; attempt < 5; attempt++) {
-        modalOpened = await page.evaluate(() => {
-          // Look for create button or upload icon
+        const opened = await page.evaluate(() => {
           const btn = (document.querySelector('#create-icon, button[aria-label="Create"], ytcp-button#create-icon, #upload-icon, ytcp-button#upload-icon') ||
             document.querySelector('ytcp-button:has-text("Upload")')) as HTMLElement;
           if (btn) {
@@ -133,9 +142,8 @@ export class YouTubeUploader {
           return false;
         });
 
-        if (modalOpened) {
+        if (opened) {
           await page.waitForTimeout(1000);
-          // Click "Upload videos" menu item
           await page.evaluate(() => {
             const item = document.querySelector('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0') as HTMLElement;
             if (item) item.click();
@@ -145,7 +153,7 @@ export class YouTubeUploader {
         await page.waitForTimeout(2000);
       }
 
-      // Check if dialog exists, or wait for it
+      // Check if dialog exists, or wait for file input
       console.log(`[+] Attaching video file: ${path.basename(fullVideoPath)}...`);
       const fileInput = page.locator('input[type="file"][name="Filedata"], ytcp-uploads-dialog input[type="file"], input[type="file"]').first();
       await fileInput.waitFor({ state: 'attached', timeout: 30000 });
@@ -278,7 +286,7 @@ export class YouTubeUploader {
       console.log('[+] Finalizing upload...');
       await page.waitForTimeout(6000);
 
-      // Take final upload confirmation screenshot
+      // Take debug screenshot
       const uploadResultScreenshot = path.resolve(process.cwd(), 'upload-result.png');
       try {
         await page.screenshot({ path: uploadResultScreenshot, fullPage: true });
