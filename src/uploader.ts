@@ -11,36 +11,36 @@ export interface UploadOptions {
   visibility?: 'public' | 'unlisted' | 'private';
   isMadeForKids?: boolean;
   cookiesPath?: string;
+  profileDir?: string;
   headless?: boolean;
   timeoutMs?: number;
 }
 
 export class YouTubeUploader {
   private cookiesPath: string;
+  private profileDir?: string;
   private headless: boolean;
   private timeoutMs: number;
 
-  constructor(options: { cookiesPath?: string; headless?: boolean; timeoutMs?: number } = {}) {
+  constructor(options: { cookiesPath?: string; profileDir?: string; headless?: boolean; timeoutMs?: number } = {}) {
     this.cookiesPath = options.cookiesPath || path.resolve(process.cwd(), 'cookies.json');
+    this.profileDir = options.profileDir || path.resolve(process.cwd(), '.yt-browser-profile');
     this.headless = options.headless ?? true;
     this.timeoutMs = options.timeoutMs ?? 300000;
   }
 
   private async applyCookies(context: BrowserContext): Promise<boolean> {
     if (!fs.existsSync(this.cookiesPath)) {
-      throw new Error(`Cookies file not found at: ${this.cookiesPath}.`);
+      return false;
     }
 
     try {
       const raw = fs.readFileSync(this.cookiesPath, 'utf8');
       const cookies = JSON.parse(raw);
 
-      if (!Array.isArray(cookies)) {
-        throw new Error('Cookies JSON must be an array of cookie objects.');
-      }
+      if (!Array.isArray(cookies)) return false;
 
       const validCookies: any[] = [];
-
       for (const c of cookies) {
         if (!c.name || typeof c.value !== 'string') continue;
 
@@ -73,10 +73,6 @@ export class YouTubeUploader {
         validCookies.push(cookieObj);
       }
 
-      if (validCookies.length === 0) {
-        throw new Error('No valid cookies found in cookies.json.');
-      }
-
       let loadedCount = 0;
       for (const cookie of validCookies) {
         try {
@@ -95,11 +91,10 @@ export class YouTubeUploader {
         }
       }
 
-      console.log(`[+] Successfully loaded ${loadedCount}/${validCookies.length} cookies from ${path.basename(this.cookiesPath)}`);
+      console.log(`[+] Loaded ${loadedCount}/${validCookies.length} cookies into browser context.`);
       return true;
-
-    } catch (err: any) {
-      throw new Error(`Failed to parse cookies: ${err.message}`);
+    } catch {
+      return false;
     }
   }
 
@@ -109,52 +104,64 @@ export class YouTubeUploader {
       throw new Error(`Video file does not exist at: ${fullVideoPath}`);
     }
 
+    const profilePath = path.resolve(opts.profileDir || this.profileDir!);
+    console.log(`[+] Using persistent profile storage at: ${profilePath}`);
     console.log(`[+] Launching Chromium (headless: ${this.headless})...`);
-    const browser = await chromium.launch({
+
+    // Use persistent context to retain device trust and security verification tokens
+    const context = await chromium.launchPersistentContext(profilePath, {
       headless: this.headless,
+      viewport: { width: 1280, height: 800 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process'
-      ]
-    });
-
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--no-first-run',
+        '--no-default-browser-check',
+      ],
+      ignoreDefaultArgs: ['--enable-automation'],
     });
 
     try {
       await this.applyCookies(context);
 
-      const page: Page = await context.newPage();
+      const page: Page = context.pages()[0] || (await context.newPage());
       page.setDefaultTimeout(this.timeoutMs);
 
       await page.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       });
 
-      console.log('[+] Navigating to YouTube Studio channel dashboard...');
+      console.log('[+] Navigating to YouTube Studio (https://studio.youtube.com)...');
       await page.goto('https://studio.youtube.com', { waitUntil: 'networkidle' });
 
+      // Detect Google Security Challenge ("Verify it's you")
       const currentUrl = page.url();
-      if (currentUrl.includes('accounts.google.com') || currentUrl.includes('/signin')) {
-        throw new Error('Authentication failed: Cookies appear to be expired or invalid. Google redirected to Sign In.');
+      if (currentUrl.includes('challenge') || currentUrl.includes('signin/v2/challenge') || currentUrl.includes('accounts.google.com')) {
+        // Take screenshot of the verification challenge so user can identify the exact prompt
+        const challengeScreenshot = path.resolve(process.cwd(), 'security-challenge.png');
+        await page.screenshot({ path: challengeScreenshot, fullPage: true }).catch(() => {});
+        
+        throw new Error(
+          `Google Security Challenge Triggered ("Verify it's you").\n` +
+          `A screenshot of the prompt was saved to: ${challengeScreenshot}\n` +
+          `👉 Please perform the one-time proxy login or review the prompt.`
+        );
       }
 
       console.log(`[+] Authenticated into YouTube Studio URL: ${currentUrl}`);
       await page.waitForTimeout(3000);
 
-      // Locate Create button
+      // Open Create -> Upload dialog
       console.log('[+] Opening Upload Dialog...');
       const createButton = page.locator('#create-icon, button[aria-label="Create"], ytcp-button#create-icon').first();
       await createButton.waitFor({ state: 'visible', timeout: 30000 });
       await createButton.click();
       await page.waitForTimeout(1000);
 
-      // Click "Upload videos" option from dropdown menu
       const uploadOption = page.locator('tp-yt-paper-item:has-text("Upload videos"), ytcp-text-menu #text:has-text("Upload videos"), #text-item-0').first();
       await uploadOption.waitFor({ state: 'visible', timeout: 10000 });
       await uploadOption.click();
@@ -204,16 +211,14 @@ export class YouTubeUploader {
         }
       }
 
-      // Made for Kids setting
+      // Made for Kids
       console.log('[+] Selecting Audience option (Not Made for Kids)...');
       const isKids = Boolean(opts.isMadeForKids);
       await page.evaluate((madeForKids) => {
         const radioName = madeForKids ? 'MADE_FOR_KIDS' : 'NOT_MADE_FOR_KIDS';
         const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${radioName}"]`) ||
           document.querySelector(`tp-yt-paper-radio-button#${radioName.toLowerCase()}`)) as HTMLElement;
-        if (radio) {
-          radio.click();
-        }
+        if (radio) radio.click();
       }, isKids).catch(() => {});
 
       await page.waitForTimeout(1500);
@@ -235,19 +240,14 @@ export class YouTubeUploader {
         }
       }
 
-      // Step Through Wizard Steps 1, 2, 3
+      // Advance Steps 1, 2, 3
       console.log('[+] Advancing through wizard steps (Details -> Video elements -> Checks -> Visibility)...');
       for (let step = 1; step <= 3; step++) {
         console.log(`[+] Progressing Step ${step}/3...`);
-        const nextButton = page.locator('#next-button, ytcp-button#next-button').first();
-        if (await nextButton.isVisible().catch(() => false)) {
-          await nextButton.click({ force: true }).catch(() => {});
-        } else {
-          await page.evaluate(() => {
-            const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
-            if (btn) btn.click();
-          }).catch(() => {});
-        }
+        await page.evaluate(() => {
+          const btn = document.querySelector('#next-button, ytcp-button#next-button') as HTMLElement;
+          if (btn) btn.click();
+        }).catch(() => {});
         await page.waitForTimeout(2000);
       }
 
@@ -255,45 +255,15 @@ export class YouTubeUploader {
       const visibility = (opts.visibility || 'unlisted').toUpperCase();
       console.log(`[+] Applying visibility: ${visibility}`);
       
-      const visibilityRadio = page.locator(`tp-yt-paper-radio-button[name="${visibility}"]`).first();
-      if (await visibilityRadio.isVisible().catch(() => false)) {
-        await visibilityRadio.click({ force: true }).catch(() => {});
-      } else {
-        await page.evaluate((vis) => {
-          const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) ||
-            document.querySelector(`tp-yt-paper-radio-button[name="${vis.toUpperCase()}"]`)) as HTMLElement;
-          if (radio) radio.click();
-        }, visibility).catch(() => {});
-      }
+      await page.evaluate((vis) => {
+        const radio = (document.querySelector(`tp-yt-paper-radio-button[name="${vis}"]`) ||
+          document.querySelector(`tp-yt-paper-radio-button[name="${vis.toUpperCase()}"]`)) as HTMLElement;
+        if (radio) radio.click();
+      }, visibility).catch(() => {});
 
       await page.waitForTimeout(2000);
 
-      // Wait until binary upload is 100% finished before closing dialog
-      console.log('[+] Monitoring upload transfer progress to YouTube CDN...');
-      let uploadFinished = false;
-      const startTime = Date.now();
-      
-      while (!uploadFinished && (Date.now() - startTime) < 180000) { // 3 min max
-        const statusText = await page.evaluate(() => {
-          const progressSpan = document.querySelector('.progress-label, .ytcp-video-upload-progress, span[class*="progress"]') as HTMLElement;
-          return progressSpan ? progressSpan.innerText : '';
-        });
-
-        if (statusText) {
-          console.log(`[+] Transfer Status: ${statusText}`);
-          if (statusText.toLowerCase().includes('complete') || statusText.toLowerCase().includes('processing') || statusText.toLowerCase().includes('saved as draft')) {
-            uploadFinished = true;
-            break;
-          }
-        } else {
-          // If no progress bar found, check if Checks/Done icon is visible
-          uploadFinished = true;
-          break;
-        }
-        await page.waitForTimeout(2000);
-      }
-
-      // Capture generated video URL from the dialog footer
+      // Extract generated video URL before closing dialog
       let videoUrl: string | undefined;
       let videoId: string | undefined;
 
@@ -304,40 +274,21 @@ export class YouTubeUploader {
         });
         if (videoUrl) {
           videoId = videoUrl.split('/').pop();
-          console.log(`\n🔗 Captured Video URL: ${videoUrl}\n`);
+          console.log(`\n🔗 Captured Video URL: ${videoUrl}`);
         }
       } catch {}
 
-      // Click Save / Publish
+      // Save / Publish
       console.log('[+] Clicking Save / Publish button...');
-      const doneButton = page.locator('#done-button, ytcp-button#done-button').first();
-      if (await doneButton.isVisible().catch(() => false)) {
-        await doneButton.click({ force: true }).catch(() => {});
-      } else {
-        await page.evaluate(() => {
-          const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
-          if (done) done.click();
-        }).catch(() => {});
-      }
+      await page.evaluate(() => {
+        const done = document.querySelector('#done-button, ytcp-button#done-button') as HTMLElement;
+        if (done) done.click();
+      }).catch(() => {});
 
-      // Wait for YouTube server to dismiss dialog and confirm draft insertion
-      console.log('[+] Waiting for YouTube server to confirm upload...');
-      await page.waitForTimeout(8000);
+      console.log('[+] Finalizing upload...');
+      await page.waitForTimeout(6000);
 
-      // Re-verify URL from final post-upload modal if needed
-      if (!videoUrl) {
-        try {
-          videoUrl = await page.evaluate(() => {
-            const link = document.querySelector('a.ytcp-video-info, a[href*="youtu.be"]') as HTMLAnchorElement;
-            return link ? link.href : undefined;
-          });
-          if (videoUrl) {
-            videoId = videoUrl.split('/').pop();
-          }
-        } catch {}
-      }
-
-      // Take debug screenshot if on VPS for visual verification
+      // Take debug screenshot on VPS
       const screenshotPath = path.resolve(process.cwd(), 'upload-result.png');
       try {
         await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -356,7 +307,6 @@ export class YouTubeUploader {
     } finally {
       try {
         await context.close().catch(() => {});
-        await browser.close().catch(() => {});
       } catch {}
     }
   }
