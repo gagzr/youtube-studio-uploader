@@ -19,11 +19,15 @@ export class YouTubeUploader {
   private cdpEndpoint: string;
   private profileDir: string;
   private timeoutMs: number;
+  private cookiesPath: string;
+  private headless: boolean;
 
-  constructor(options: { cdpEndpoint?: string; profileDir?: string; timeoutMs?: number } = {}) {
+  constructor(options: { cdpEndpoint?: string; profileDir?: string; timeoutMs?: number; cookiesPath?: string; headless?: boolean } = {}) {
     this.cdpEndpoint = options.cdpEndpoint || process.env.CDP_ENDPOINT || 'http://127.0.0.1:9222';
     this.profileDir = options.profileDir || path.resolve(process.cwd(), '.yt-browser-profile');
     this.timeoutMs = options.timeoutMs ?? 300000;
+    this.cookiesPath = options.cookiesPath || path.resolve(process.cwd(), 'cookies.json');
+    this.headless = options.headless !== undefined ? options.headless : true;
   }
 
   private async getBrowserContext(): Promise<{ browser?: Browser; context: BrowserContext; isAttachedCDP: boolean }> {
@@ -36,7 +40,7 @@ export class YouTubeUploader {
     } catch {
       console.log(`[!] No running daemon found at ${this.cdpEndpoint}. Launching persistent context with stealth engine...`);
       const context = await chromium.launchPersistentContext(this.profileDir, {
-        headless: true,
+        headless: this.headless,
         viewport: { width: 1440, height: 900 },
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         locale: 'en-US',
@@ -59,9 +63,36 @@ export class YouTubeUploader {
         ],
         ignoreDefaultArgs: ['--enable-automation'],
       });
+
+      // Inject saved cookies so the session is already authenticated
+      if (fs.existsSync(this.cookiesPath)) {
+        try {
+          const raw = fs.readFileSync(this.cookiesPath, 'utf8');
+          const cookies = JSON.parse(raw);
+          if (Array.isArray(cookies) && cookies.length > 0) {
+            await context.addCookies(cookies.map((c: any) => ({
+              name: c.name,
+              value: c.value,
+              domain: (c.domain || '.youtube.com').split(':')[0],
+              path: c.path || '/',
+              secure: c.secure,
+              httpOnly: c.httpOnly,
+              sameSite: c.sameSite,
+              expires: c.expires,
+            })));
+            console.log(`[+] Injected ${cookies.length} cookies from: ${this.cookiesPath}`);
+          }
+        } catch (e: any) {
+          console.warn(`[!] Failed to inject cookies: ${e.message}`);
+        }
+      } else {
+        console.warn(`[!] No cookies.json found at ${this.cookiesPath}. You may be redirected to login.`);
+      }
+
       return { context, isAttachedCDP: false };
     }
   }
+
 
   public async upload(opts: UploadOptions): Promise<{ videoId?: string; videoUrl?: string }> {
     const fullVideoPath = path.resolve(opts.videoPath);

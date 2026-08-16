@@ -12,6 +12,7 @@
     "remote-debug": "tsx src/remote-debug.ts",
     "upload": "tsx src/cli.ts",
     "batch": "tsx src/batch.ts",
+    "download-samples": "tsx src/download-samples.ts",
     "start": "tsx src/cli.ts"
   },
   "keywords": [
