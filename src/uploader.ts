@@ -330,26 +330,66 @@ export class YouTubeUploader {
       let videoId: string | undefined;
 
       const extractUrlFromPage = async (): Promise<string | undefined> => {
-        return await page.evaluate(() => {
-          // 1. Check anchor elements
-          const link = document.querySelector('a.ytcp-video-info, a[href*="youtu.be"], a.ytcp-video-metadata-info[href*="youtu.be"], ytcp-video-info a, a.ytcp-video-list-cell-video') as HTMLAnchorElement;
-          if (link && link.href && link.href.includes('youtu.be/')) return link.href;
+        // Strategy 1: Extract from the page URL itself (studio.youtube.com/video/VIDEO_ID/edit)
+        const pageUrl = page.url();
+        const studioMatch = pageUrl.match(/studio\.youtube\.com\/video\/([a-zA-Z0-9_-]{8,})/);
+        if (studioMatch) return `https://youtu.be/${studioMatch[1]}`;
 
-          // 2. Check for youtu.be anywhere in text nodes
+        return await page.evaluate(() => {
+          // Strategy 2: Any anchor with youtu.be or youtube.com/watch in href
+          const allLinks = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[];
+          for (const link of allLinks) {
+            const href = link.href;
+            const shortMatch = href.match(/youtu\.be\/([a-zA-Z0-9_-]{8,})/);
+            if (shortMatch) return `https://youtu.be/${shortMatch[1]}`;
+            const longMatch = href.match(/youtube\.com\/watch\?v=([a-zA-Z0-9_-]{8,})/);
+            if (longMatch) return `https://youtu.be/${longMatch[1]}`;
+          }
+
+          // Strategy 3: Known YouTube Studio upload dialog selectors
+          const knownSelectors = [
+            'a.ytcp-video-info',
+            'a.ytcp-video-metadata-info',
+            'ytcp-video-info a',
+            'a.ytcp-video-list-cell-video',
+            '.video-url-fadeable a',
+            '.video-url a',
+            'a.ytcp-uploads-dialog-header-links',
+            '.ytcp-uploads-dialog a[href*="youtu"]',
+          ];
+          for (const sel of knownSelectors) {
+            const el = document.querySelector(sel) as HTMLAnchorElement;
+            if (el?.href) {
+              const m = el.href.match(/(?:youtu\.be\/|youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{8,})/);
+              if (m) return `https://youtu.be/${m[1]}`;
+            }
+          }
+
+          // Strategy 4: Scan all text nodes for youtu.be or youtube.com/watch URLs
           const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
           let node: Node | null;
           while ((node = walker.nextNode())) {
             const val = node.nodeValue || '';
-            const match = val.match(/https?:\/\/youtu\.be\/[a-zA-Z0-9_-]{8,}/);
-            if (match) return match[0];
+            const shortMatch = val.match(/https?:\/\/youtu\.be\/([a-zA-Z0-9_-]{8,})/);
+            if (shortMatch) return shortMatch[0];
+            const longMatch = val.match(/https?:\/\/(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{8,})/);
+            if (longMatch) return `https://youtu.be/${longMatch[1]}`;
           }
 
-          // 3. Check for video ID attributes
-          const elWithId = document.querySelector('[video-id], [data-video-id]');
+          // Strategy 5: Check element attributes for video IDs
+          const idSelectors = '[video-id], [data-video-id], [data-video-external-id]';
+          const elWithId = document.querySelector(idSelectors);
           if (elWithId) {
-            const id = elWithId.getAttribute('video-id') || elWithId.getAttribute('data-video-id');
-            if (id) return `https://youtu.be/${id}`;
+            const id = elWithId.getAttribute('video-id')
+              || elWithId.getAttribute('data-video-id')
+              || elWithId.getAttribute('data-video-external-id');
+            if (id && id.length >= 8) return `https://youtu.be/${id}`;
           }
+
+          // Strategy 6: Scan the entire page HTML as a last resort
+          const bodyHtml = document.body.innerHTML;
+          const htmlMatch = bodyHtml.match(/(?:youtu\.be\/|youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})/);
+          if (htmlMatch) return `https://youtu.be/${htmlMatch[1]}`;
 
           return undefined;
         });
@@ -367,14 +407,23 @@ export class YouTubeUploader {
       console.log('[+] Finalizing upload...');
       await page.waitForTimeout(4000);
 
-      // Extract again from the post-publish confirmation dialog (e.g. "Video published" modal)
+      // Retry extraction with polling — the URL sometimes appears after a short delay
       if (!videoUrl) {
-        videoUrl = await extractUrlFromPage();
+        for (let attempt = 0; attempt < 5; attempt++) {
+          videoUrl = await extractUrlFromPage();
+          if (videoUrl) break;
+          await page.waitForTimeout(2000);
+        }
       }
 
       if (videoUrl) {
-        videoId = videoUrl.split('/').pop();
+        // Normalize to extract just the video ID
+        const idMatch = videoUrl.match(/(?:youtu\.be\/|youtube\.com\/watch\?v=|\/video\/)([a-zA-Z0-9_-]{8,})/);
+        videoId = idMatch ? idMatch[1] : videoUrl.split('/').pop();
+        videoUrl = `https://youtu.be/${videoId}`;
         console.log(`\n🔗 Video URL Captured: ${videoUrl}`);
+      } else {
+        console.warn('[!] Could not extract video URL. Check upload-result.png for diagnostics.');
       }
 
       // Take debug screenshot

@@ -129,7 +129,11 @@ async function runBatch() {
     // Check if already succeeded in previous run
     if (history[absPath] && history[absPath].status === 'SUCCESS') {
       console.log(`⏩ [SKIPPED] Already uploaded successfully!`);
-      console.log(`👉 Video URL: ${history[absPath].videoUrl}`);
+      if (history[absPath].videoUrl) {
+        console.log(`👉 Video URL: ${history[absPath].videoUrl}`);
+      } else {
+        console.log(`👉 Video URL was not captured. Check YouTube Studio manually.`);
+      }
       skippedCount++;
       continue;
     }
